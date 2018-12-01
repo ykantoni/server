@@ -887,6 +887,32 @@ int main()
 }"
 HAVE_GCC_ATOMIC_BUILTINS)
 CHECK_CXX_SOURCE_COMPILES("
+#include <cstdint>
+int main() {
+  uint64_t x = 1;
+  __atomic_add_fetch(&x, 0, __ATOMIC_RELAXED);
+  return x;
+}
+" HAVE_ATOMIC_ADD_FETCH)
+IF(NOT HAVE_ATOMIC_ADD_FETCH)
+  SET(SAVE_CMAKE_REQUIRED_LIBRARIES ${CMAKE_REQUIRED_LIBRARIES})
+  SET(CMAKE_REQUIRED_LIBRARIES ${CMAKE_REQUIRED_LIBRARIES} atomic)
+  CHECK_CXX_SOURCE_COMPILES("
+  #include <cstdint>
+  int main() {
+    uint64_t x = 1;
+    __atomic_add_fetch(&x, 0, __ATOMIC_RELAXED);
+    return x;
+  }
+  " HAVE_ATOMIC_ADD_FETCH_WITH_LIBATOMIC)
+  IF(HAVE_ATOMIC_ADD_FETCH_WITH_LIBATOMIC)
+    SET(LIBATOMIC atomic)
+  ELSE()
+    # revert the required libraries if unsuccessful
+    SET(CMAKE_REQUIRED_LIBRARIES ${SAVE_CMAKE_REQUIRED_LIBRARIES})
+  ENDIF()
+ENDIF()
+CHECK_CXX_SOURCE_COMPILES("
 int main()
 {
   long long int var= 1;

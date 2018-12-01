@@ -13,11 +13,12 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335 USA
 
-MY_ADD_TESTS(bitmap base64 my_atomic my_rdtsc lf my_malloc my_getopt dynstring
+MY_ADD_TESTS(bitmap base64 my_rdtsc lf my_malloc my_getopt dynstring
              byte_order
              queues stacktrace LINK_LIBRARIES mysys)
 MY_ADD_TESTS(my_vsnprintf LINK_LIBRARIES strings mysys)
 MY_ADD_TESTS(aes LINK_LIBRARIES  mysys mysys_ssl)
+MY_ADD_TESTS(my_atomic LINK_LIBRARIES mysys ${LIBATOMIC})
 ADD_DEFINITIONS(${SSL_DEFINES})
 
 MY_ADD_TESTS(ma_dyncol LINK_LIBRARIES  mysys)
