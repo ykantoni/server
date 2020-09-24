@@ -1404,7 +1404,10 @@ void dict_table_t::empty_table()
   {
     if (index->online_status == ONLINE_INDEX_ABORTED
         || index->online_status == ONLINE_INDEX_ABORTED_DROPPED)
-      return;
+      continue;
+
+    if (index->page == FIL_NULL && index->type & DICT_FTS)
+      continue;
 
     mtr.start();
     /* Free the indexes */
