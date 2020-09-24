@@ -3102,7 +3102,7 @@ bool create_key_parts_for_pseudo_indexes(RANGE_OPT_PARAM *param,
   {
     Field *field= *field_ptr;
     if (bitmap_is_set(used_fields, field->field_index) &&
-        is_eits_usable(field))
+        field->is_eits_usable())
       parts++;
   }
 
@@ -3123,7 +3123,7 @@ bool create_key_parts_for_pseudo_indexes(RANGE_OPT_PARAM *param,
     Field *field= *field_ptr;
     if (bitmap_is_set(used_fields, field->field_index))
     {
-      if (!is_eits_usable(field))
+      if (!field->is_eits_usable())
         continue;
 
       uint16 store_length;
