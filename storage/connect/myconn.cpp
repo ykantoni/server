@@ -1033,7 +1033,7 @@ int MYSQLC::ExecSQLcmd(PGLOBAL g, const char *query, int *w)
   int rc = RC_OK;
 
   if (!m_DB) {
-    strcpy(g->Message, "MySQL not connected");
+    strcpy(g->Message, "MariaDB not connected");
     return RC_FX;
   } else
     *w = 0;
