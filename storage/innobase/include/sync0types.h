@@ -188,13 +188,7 @@ enum latch_level_t {
 
 	SYNC_ANY_LATCH,
 
-	SYNC_DOUBLEWRITE,
-
-	SYNC_BUF_FLUSH_LIST,
-
 	SYNC_BUF_PAGE_HASH,
-
-	SYNC_BUF_POOL,
 
 	SYNC_POOL,
 	SYNC_POOL_MANAGER,
@@ -210,7 +204,6 @@ enum latch_level_t {
 	SYNC_RECV,
 	SYNC_LOG_FLUSH_ORDER,
 	SYNC_LOG,
-	SYNC_PAGE_CLEANER,
 	SYNC_PURGE_QUEUE,
 	SYNC_TRX_SYS_HEADER,
 	SYNC_REC_LOCK,
@@ -256,8 +249,6 @@ enum latch_level_t {
 
 	SYNC_TRX_I_S_RWLOCK,
 
-	SYNC_RECV_WRITER,
-
 	/** Level is varying. Only used with buffer pool page locks, which
 	do not have a fixed level, but instead have their level set after
 	the page is locked; see e.g.  ibuf_bitmap_get_map_page(). */
@@ -275,11 +266,9 @@ enum latch_level_t {
 up its meta-data. See sync0debug.cc. */
 enum latch_id_t {
 	LATCH_ID_NONE = 0,
-	LATCH_ID_BUF_POOL,
 	LATCH_ID_DICT_FOREIGN_ERR,
 	LATCH_ID_DICT_SYS,
 	LATCH_ID_FIL_SYSTEM,
-	LATCH_ID_FLUSH_LIST,
 	LATCH_ID_FTS_BG_THREADS,
 	LATCH_ID_FTS_DELETE,
 	LATCH_ID_FTS_DOC_ID,
@@ -289,11 +278,9 @@ enum latch_id_t {
 	LATCH_ID_IBUF_PESSIMISTIC_INSERT,
 	LATCH_ID_LOG_SYS,
 	LATCH_ID_LOG_FLUSH_ORDER,
-	LATCH_ID_PAGE_CLEANER,
 	LATCH_ID_PURGE_SYS_PQ,
 	LATCH_ID_RECALC_POOL,
 	LATCH_ID_RECV_SYS,
-	LATCH_ID_RECV_WRITER,
 	LATCH_ID_REDO_RSEG,
 	LATCH_ID_NOREDO_RSEG,
 	LATCH_ID_RW_LOCK_DEBUG,
@@ -304,7 +291,6 @@ enum latch_id_t {
 	LATCH_ID_SRV_INNODB_MONITOR,
 	LATCH_ID_SRV_MISC_TMPFILE,
 	LATCH_ID_SRV_MONITOR_FILE,
-	LATCH_ID_BUF_DBLWR,
 	LATCH_ID_TRX_POOL,
 	LATCH_ID_TRX_POOL_MANAGER,
 	LATCH_ID_TRX,
@@ -987,9 +973,7 @@ struct sync_checker : public sync_check_functor_t
 	{
 		if (some_allowed) {
 			switch (level) {
-			case SYNC_RECV_WRITER:
-				/* This only happens in
-				recv_apply_hashed_log_recs. */
+			case SYNC_FSP:
 			case SYNC_DICT:
 			case SYNC_DICT_OPERATION:
 			case SYNC_FTS_CACHE:

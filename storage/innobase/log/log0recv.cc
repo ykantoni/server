@@ -90,13 +90,6 @@ is bigger than the lsn we are able to scan up to, that is an indication that
 the recovery failed and the database may be corrupt. */
 static lsn_t	recv_max_page_lsn;
 
-#ifdef UNIV_PFS_THREAD
-mysql_pfs_key_t	recv_writer_thread_key;
-#endif /* UNIV_PFS_THREAD */
-
-/** Is recv_writer_thread active? */
-bool	recv_writer_thread_active;
-
 /** Stored physical log record with logical LSN (@see log_t::FORMAT_10_5) */
 struct log_phys_t : public log_rec_t
 {
@@ -915,7 +908,6 @@ same_space:
 void recv_sys_t::close()
 {
   ut_ad(this == &recv_sys);
-  ut_ad(!recv_writer_thread_active);
 
   if (is_initialised())
   {
@@ -924,9 +916,6 @@ void recv_sys_t::close()
     clear();
     ut_d(mutex_exit(&mutex));
 
-    os_event_destroy(flush_start);
-    os_event_destroy(flush_end);
-
     if (buf)
     {
       ut_free_dodump(buf, RECV_PARSING_BUF_SIZE);
@@ -934,7 +923,6 @@ void recv_sys_t::close()
     }
 
     last_stored_lsn= 0;
-    mutex_free(&writer_mutex);
     mutex_free(&mutex);
   }
 
@@ -944,80 +932,13 @@ void recv_sys_t::close()
   close_files();
 }
 
-/******************************************************************//**
-recv_writer thread tasked with flushing dirty pages from the buffer
-pools.
-@return a dummy parameter */
-extern "C"
-os_thread_ret_t
-DECLARE_THREAD(recv_writer_thread)(
-/*===============================*/
-	void*	arg MY_ATTRIBUTE((unused)))
-			/*!< in: a dummy parameter required by
-			os_thread_create */
-{
-	my_thread_init();
-	ut_ad(!srv_read_only_mode);
-
-#ifdef UNIV_PFS_THREAD
-	pfs_register_thread(recv_writer_thread_key);
-#endif /* UNIV_PFS_THREAD */
-
-#ifdef UNIV_DEBUG_THREAD_CREATION
-	ib::info() << "recv_writer thread running, id "
-		<< os_thread_pf(os_thread_get_curr_id());
-#endif /* UNIV_DEBUG_THREAD_CREATION */
-
-	while (srv_shutdown_state == SRV_SHUTDOWN_NONE) {
-
-		/* Wait till we get a signal to clean the LRU list.
-		Bounded by max wait time of 100ms. */
-		int64_t      sig_count = os_event_reset(buf_flush_event);
-		os_event_wait_time_low(buf_flush_event, 100000, sig_count);
-
-		mutex_enter(&recv_sys.writer_mutex);
-
-		if (!recv_recovery_is_on()) {
-			mutex_exit(&recv_sys.writer_mutex);
-			break;
-		}
-
-		/* Flush pages from end of LRU if required */
-		os_event_reset(recv_sys.flush_end);
-		recv_sys.flush_lru = true;
-		os_event_set(recv_sys.flush_start);
-		os_event_wait(recv_sys.flush_end);
-
-		mutex_exit(&recv_sys.writer_mutex);
-	}
-
-	recv_writer_thread_active = false;
-
-	my_thread_end();
-	/* We count the number of threads in os_thread_exit().
-	A created thread should always use that to exit and not
-	use return() to exit. */
-	os_thread_exit();
-
-	OS_THREAD_DUMMY_RETURN;
-}
-
 /** Initialize the redo log recovery subsystem. */
 void recv_sys_t::create()
 {
 	ut_ad(this == &recv_sys);
 	ut_ad(!is_initialised());
-	ut_ad(!flush_start);
-	ut_ad(!flush_end);
 	mutex_create(LATCH_ID_RECV_SYS, &mutex);
-	mutex_create(LATCH_ID_RECV_WRITER, &writer_mutex);
 
-	if (!srv_read_only_mode) {
-		flush_start = os_event_create(0);
-		flush_end = os_event_create(0);
-	}
-
-	flush_lru = true;
 	apply_log_recs = false;
 	apply_batch_on = false;
 
@@ -1068,19 +989,11 @@ void recv_sys_t::debug_free()
   ut_ad(is_initialised());
   mutex_enter(&mutex);
 
+  recovery_on= false;
   pages.clear();
   ut_free_dodump(buf, RECV_PARSING_BUF_SIZE);
 
   buf= nullptr;
-
-  /* wake page cleaner up to progress */
-  if (!srv_read_only_mode)
-  {
-    ut_ad(!recv_recovery_is_on());
-    ut_ad(!recv_writer_thread_active);
-    os_event_reset(buf_flush_event);
-    os_event_set(flush_start);
-  }
 
   mutex_exit(&mutex);
 }
@@ -2584,9 +2497,11 @@ static void recv_read_in_area(page_id_t page_id)
 @param page_id  page identifier
 @param p        iterator pointing to page_id
 @param mtr      mini-transaction
+@param b        pre-allocated buffer pool block
 @return whether the page was successfully initialized */
 inline buf_block_t *recv_sys_t::recover_low(const page_id_t page_id,
-                                            map::iterator &p, mtr_t &mtr)
+                                            map::iterator &p, mtr_t &mtr,
+                                            buf_block_t *b)
 {
   ut_ad(mutex_own(&mutex));
   ut_ad(p->first == page_id);
@@ -2602,20 +2517,21 @@ inline buf_block_t *recv_sys_t::recover_low(const page_id_t page_id,
   {
     mtr.start();
     mtr.set_log_mode(MTR_LOG_NO_REDO);
-    block= buf_page_create(space, page_id.page_no(), space->zip_size(), &mtr);
-    p= recv_sys.pages.find(page_id);
-    if (p == recv_sys.pages.end())
+    block= buf_page_create(space, page_id.page_no(), space->zip_size(), &mtr,
+                           b);
+    if (UNIV_UNLIKELY(block != b))
     {
       /* The page happened to exist in the buffer pool, or it was just
       being read in. Before buf_page_get_with_no_latch() returned to
       buf_page_create(), all changes must have been applied to the
       page already. */
+      ut_ad(recv_sys.pages.find(page_id) == recv_sys.pages.end());
       mtr.commit();
       block= nullptr;
     }
     else
     {
-      ut_ad(&recs == &p->second);
+      ut_ad(&recs == &recv_sys.pages.find(page_id)->second);
       i.created= true;
       buf_block_dbg_add_level(block, SYNC_NO_ORDER_CHECK);
       recv_recover_page(block, mtr, p, space, &i);
@@ -2635,6 +2551,7 @@ inline buf_block_t *recv_sys_t::recover_low(const page_id_t page_id,
 @return whether the page was successfully initialized */
 buf_block_t *recv_sys_t::recover_low(const page_id_t page_id)
 {
+  buf_block_t *free_block= buf_LRU_get_free_block(false);
   buf_block_t *block= nullptr;
 
   mutex_enter(&mutex);
@@ -2643,10 +2560,13 @@ buf_block_t *recv_sys_t::recover_low(const page_id_t page_id)
   if (p != pages.end() && p->second.state == page_recv_t::RECV_WILL_NOT_READ)
   {
     mtr_t mtr;
-    block= recover_low(page_id, p, mtr);
+    block= recover_low(page_id, p, mtr, free_block);
+    ut_ad(!block || block == free_block);
   }
 
   mutex_exit(&mutex);
+  if (UNIV_UNLIKELY(!block))
+    buf_pool.free_block(free_block);
   return block;
 }
 
@@ -2701,6 +2621,8 @@ void recv_sys_t::apply(bool last_batch)
         trim(page_id_t(id + srv_undo_space_id_start, t.pages), t.lsn);
     }
 
+    buf_block_t *free_block= buf_LRU_get_free_block(false);
+
     for (map::iterator p= pages.begin(); p != pages.end(); )
     {
       const page_id_t page_id= p->first;
@@ -2713,7 +2635,14 @@ void recv_sys_t::apply(bool last_batch)
         p++;
         continue;
       case page_recv_t::RECV_WILL_NOT_READ:
-        recover_low(page_id, p, mtr);
+        if (UNIV_LIKELY(!!recover_low(page_id, p, mtr, free_block)))
+        {
+          mutex_exit(&mutex);
+          free_block= buf_LRU_get_free_block(false);
+          mutex_enter(&mutex);
+next_page:
+          p= pages.lower_bound(page_id);
+        }
         continue;
       case page_recv_t::RECV_NOT_PROCESSED:
         mtr.start();
@@ -2739,8 +2668,10 @@ void recv_sys_t::apply(bool last_batch)
         continue;
       }
 
-      p= pages.lower_bound(page_id);
+      goto next_page;
     }
+
+    buf_pool.free_block(free_block);
 
     /* Wait until all the pages have been processed */
     while (!pages.empty())
@@ -2759,35 +2690,29 @@ void recv_sys_t::apply(bool last_batch)
     }
   }
 
-  if (!last_batch)
-  {
-    /* Flush all the file pages to disk and invalidate them in buf_pool */
-    mutex_exit(&mutex);
-    log_mutex_exit();
-
-    /* Stop the recv_writer thread from issuing any LRU flush batches. */
-    mutex_enter(&writer_mutex);
-
-    /* Wait for any currently run batch to end. */
-    buf_flush_wait_LRU_batch_end();
-
-    os_event_reset(flush_end);
-    flush_lru= false;
-    os_event_set(flush_start);
-    os_event_wait(flush_end);
-
-    buf_pool_invalidate();
-
-    /* Allow batches from recv_writer thread. */
-    mutex_exit(&writer_mutex);
-
-    log_mutex_enter();
-    mutex_enter(&mutex);
-    mlog_init.reset();
-  }
-  else
+  if (last_batch)
     /* We skipped this in buf_page_create(). */
     mlog_init.mark_ibuf_exist(mtr);
+  else
+  {
+    mlog_init.reset();
+    log_mutex_exit();
+  }
+
+  ut_ad(!log_mutex_own());
+  mutex_exit(&mutex);
+
+  /* For last_batch, we could avoid the flush if we sorted the
+  buf_pool.flush_list here. */
+  buf_flush_sync();
+
+  if (!last_batch)
+  {
+    buf_pool_invalidate();
+    log_mutex_enter();
+  }
+
+  mutex_enter(&mutex);
 
   ut_d(after_apply= true);
   clear();
@@ -3120,7 +3045,6 @@ recv_group_scan_log_recs(
 	recv_sys.recovered_lsn = *contiguous_lsn;
 	recv_sys.scanned_checkpoint_no = 0;
 	ut_ad(recv_max_page_lsn == 0);
-	ut_ad(last_phase || !recv_writer_thread_active);
 	mutex_exit(&recv_sys.mutex);
 
 	lsn_t	start_lsn;
@@ -3343,7 +3267,6 @@ recv_init_crash_recovery_spaces(bool rescan, bool& missing_tablespace)
 }
 
 /** Start recovering from a redo log checkpoint.
-@see recv_recovery_from_checkpoint_finish
 @param[in]	flush_lsn	FIL_PAGE_FILE_FLUSH_LSN
 of first system tablespace page
 @return error code or DB_SUCCESS */
@@ -3361,14 +3284,10 @@ recv_recovery_from_checkpoint_start(lsn_t flush_lsn)
 	ut_ad(srv_operation == SRV_OPERATION_NORMAL
 	      || srv_operation == SRV_OPERATION_RESTORE
 	      || srv_operation == SRV_OPERATION_RESTORE_EXPORT);
-	ut_d(mutex_enter(&buf_pool.flush_list_mutex));
+	ut_d(mysql_mutex_lock(&buf_pool.flush_list_mutex));
 	ut_ad(UT_LIST_GET_LEN(buf_pool.LRU) == 0);
 	ut_ad(UT_LIST_GET_LEN(buf_pool.unzip_LRU) == 0);
-	ut_d(mutex_exit(&buf_pool.flush_list_mutex));
-
-	/* Initialize red-black tree for fast insertions into the
-	flush_list during recovery process. */
-	buf_flush_init_flush_rbt();
+	ut_d(mysql_mutex_unlock(&buf_pool.flush_list_mutex));
 
 	if (srv_force_recovery >= SRV_FORCE_NO_LOG_REDO) {
 
@@ -3521,6 +3440,11 @@ completed:
 	}
 
 	log_sys.set_lsn(recv_sys.recovered_lsn);
+	if (UNIV_LIKELY(log_sys.get_flushed_lsn() < recv_sys.recovered_lsn)) {
+		/* This may already have been set by create_log_file()
+		if no logs existed when the server started up. */
+		log_sys.set_flushed_lsn(recv_sys.recovered_lsn);
+	}
 
 	if (recv_needed_recovery) {
 		bool missing_tablespace = false;
@@ -3569,15 +3493,10 @@ completed:
 		recv_sys.parse_start_lsn = checkpoint_lsn;
 
 		if (srv_operation == SRV_OPERATION_NORMAL) {
-			buf_dblwr_process();
+			buf_dblwr.recover();
 		}
 
 		ut_ad(srv_force_recovery <= SRV_FORCE_NO_UNDO_LOG_SCAN);
-
-		/* Spawn the background thread to flush dirty pages
-		from the buffer pools. */
-		recv_writer_thread_active = true;
-		os_thread_create(recv_writer_thread);
 
 		if (rescan) {
 			contiguous_lsn = checkpoint_lsn;
@@ -3656,45 +3575,6 @@ completed:
 	records in the hash table can be run in background. */
 
 	return(DB_SUCCESS);
-}
-
-/** Complete recovery from a checkpoint. */
-void
-recv_recovery_from_checkpoint_finish(void)
-{
-	/* Make sure that the recv_writer thread is done. This is
-	required because it grabs various mutexes and we want to
-	ensure that when we enable sync_order_checks there is no
-	mutex currently held by any thread. */
-	mutex_enter(&recv_sys.writer_mutex);
-
-	/* Free the resources of the recovery system */
-	recv_sys.recovery_on = false;
-
-	/* By acquring the mutex we ensure that the recv_writer thread
-	won't trigger any more LRU batches. Now wait for currently
-	in progress batches to finish. */
-	buf_flush_wait_LRU_batch_end();
-
-	mutex_exit(&recv_sys.writer_mutex);
-
-	ulint count = 0;
-	while (recv_writer_thread_active) {
-		++count;
-		os_thread_sleep(100000);
-		if (srv_print_verbose_log && count > 600) {
-			ib::info() << "Waiting for recv_writer to"
-				" finish flushing of buffer pool";
-			count = 0;
-		}
-	}
-
-	recv_sys.debug_free();
-
-	/* Free up the flush_rbt. */
-	buf_flush_free_flush_rbt();
-	/* Enable innodb_sync_debug checks */
-	ut_d(sync_check_enable());
 }
 
 bool recv_dblwr_t::validate_page(const page_id_t page_id,
@@ -3779,7 +3659,7 @@ byte *recv_dblwr_t::find_page(const page_id_t page_id,
     if (lsn <= max_lsn ||
         !validate_page(page_id, page, space, tmp_buf))
     {
-      /* Mark processed for subsequent iterations in buf_dblwr_process() */
+      /* Mark processed for subsequent iterations in buf_dblwr_t::recover() */
       memset(page + FIL_PAGE_LSN, 0, 8);
       continue;
     }

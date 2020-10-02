@@ -493,7 +493,7 @@ void log_t::create()
   log record has a non-zero start lsn, a fact which we will use */
 
   set_lsn(LOG_START_LSN + LOG_BLOCK_HDR_SIZE);
-  set_flushed_lsn(0);
+  set_flushed_lsn(LOG_START_LSN + LOG_BLOCK_HDR_SIZE);
 
   ut_ad(srv_log_buffer_size >= 16 * OS_FILE_LOG_BLOCK_SIZE);
   ut_ad(srv_log_buffer_size >= 4U << srv_page_size_shift);
@@ -936,7 +936,8 @@ loop:
 and invoke log_mutex_enter(). */
 static void log_write_flush_to_disk_low(lsn_t lsn)
 {
-  log_sys.log.flush();
+  if (!log_sys.log.writes_are_durable())
+    log_sys.log.flush();
   ut_a(lsn >= log_sys.get_flushed_lsn());
   log_sys.set_flushed_lsn(lsn);
 }
@@ -1129,12 +1130,7 @@ void log_write_up_to(lsn_t lsn, bool flush_to_disk, bool rotate_key)
   /* Flush the highest written lsn.*/
   auto flush_lsn = write_lock.value();
   flush_lock.set_pending(flush_lsn);
-
-  if (!log_sys.log.writes_are_durable())
-  {
-    log_write_flush_to_disk_low(flush_lsn);
-  }
-
+  log_write_flush_to_disk_low(flush_lsn);
   flush_lock.release(flush_lsn);
 
   innobase_mysql_log_notify(flush_lsn);
@@ -1206,9 +1202,10 @@ static bool log_preflush_pool_modified_pages(lsn_t new_oldest)
 
 		ulint	n_pages;
 
-		success = buf_flush_lists(ULINT_MAX, new_oldest, &n_pages);
+		success = buf_flush_lists(ULINT_UNDEFINED, new_oldest,
+					  &n_pages);
 
-		buf_flush_wait_batch_end(false);
+		buf_flush_wait_batch_end_acquiring_mutex(false);
 
 		if (!success) {
 			MONITOR_INC(MONITOR_FLUSH_SYNC_WAITS);
@@ -1221,12 +1218,6 @@ static bool log_preflush_pool_modified_pages(lsn_t new_oldest)
 			n_pages);
 	} else {
 		/* better to wait for flushed by page cleaner */
-
-		if (srv_flush_sync) {
-			/* wake page cleaner for IO burst */
-			buf_flush_request_force(new_oldest);
-		}
-
 		buf_flush_wait_flushed(new_oldest);
 
 		success = true;
@@ -1515,6 +1506,41 @@ void log_check_margins()
 
 extern void buf_resize_shutdown();
 
+/** @return the number of dirty pages in the buffer pool */
+static ulint flush_list_length()
+{
+  mysql_mutex_lock(&buf_pool.flush_list_mutex);
+  const ulint len= UT_LIST_GET_LEN(buf_pool.flush_list);
+  mysql_mutex_unlock(&buf_pool.flush_list_mutex);
+  return len;
+}
+
+static void flush_buffer_pool()
+{
+  service_manager_extend_timeout(INNODB_EXTEND_TIMEOUT_INTERVAL,
+                                 "Waiting to flush the buffer pool");
+  while (flush_list_length())
+  {
+    buf_flush_lists(ULINT_UNDEFINED, LSN_MAX);
+    timespec abstime;
+
+    if (buf_pool.n_flush_list)
+    {
+      service_manager_extend_timeout(INNODB_EXTEND_TIMEOUT_INTERVAL,
+                                     "Waiting to flush " ULINTPF " pages",
+                                     flush_list_length());
+      set_timespec(abstime, INNODB_EXTEND_TIMEOUT_INTERVAL / 2);
+      mysql_mutex_lock(&buf_pool.mutex);
+      if (buf_pool.n_flush_list)
+        mysql_cond_timedwait(&buf_pool.done_flush_list, &buf_pool.mutex,
+                             &abstime);
+      mysql_mutex_unlock(&buf_pool.mutex);
+    }
+  }
+
+  ut_ad(!buf_pool.any_io_pending());
+}
+
 /** Make a checkpoint at the latest lsn on shutdown. */
 void logs_empty_and_mark_files_at_shutdown()
 {
@@ -1555,14 +1581,6 @@ loop:
 	ut_ad(log_sys.is_initialised() || !srv_was_started);
 	ut_ad(fil_system.is_initialised() || !srv_was_started);
 
-	if (!srv_read_only_mode) {
-		if (recv_sys.flush_start) {
-			/* This is in case recv_writer_thread was never
-			started, or buf_flush_page_cleaner
-			failed to notice its termination. */
-			os_event_set(recv_sys.flush_start);
-		}
-	}
 #define COUNT_INTERVAL 600U
 #define CHECK_INTERVAL 100000U
 	os_thread_sleep(CHECK_INTERVAL);
@@ -1624,30 +1642,26 @@ wait_suspend_loop:
 		goto wait_suspend_loop;
 	}
 
+	if (buf_page_cleaner_is_active) {
+		thread_name = "page cleaner thread";
+		mysql_cond_signal(&buf_pool.do_flush_list);
+		goto wait_suspend_loop;
+	}
+
 	buf_load_dump_end();
 
-	srv_shutdown_state = SRV_SHUTDOWN_FLUSH_PHASE;
-
-	/* At this point only page_cleaner should be active. We wait
-	here to let it complete the flushing of the buffer pools
-	before proceeding further. */
-
-	count = 0;
-	service_manager_extend_timeout(COUNT_INTERVAL * CHECK_INTERVAL/1000000 * 2,
-		"Waiting for page cleaner");
-	while (buf_page_cleaner_is_active) {
-		++count;
-		os_thread_sleep(CHECK_INTERVAL);
-		if (srv_print_verbose_log && count > COUNT_INTERVAL) {
-			service_manager_extend_timeout(COUNT_INTERVAL * CHECK_INTERVAL/1000000 * 2,
-				"Waiting for page cleaner");
-			ib::info() << "Waiting for page_cleaner to "
-				"finish flushing of buffer pool";
-			/* This is a workaround to avoid the InnoDB hang
-			when OS datetime changed backwards */
-			os_event_set(buf_flush_event);
+	if (!buf_pool.is_initialised()) {
+		ut_ad(!srv_was_started);
+	} else if (ulint pending_io = buf_pool.io_pending()) {
+		if (srv_print_verbose_log && count > 600) {
+			ib::info() << "Waiting for " << pending_io << " buffer"
+				" page I/Os to complete";
 			count = 0;
 		}
+
+		goto loop;
+	} else {
+		flush_buffer_pool();
 	}
 
 	if (log_sys.is_initialised()) {
@@ -1666,18 +1680,6 @@ wait_suspend_loop:
 			}
 			goto loop;
 		}
-	}
-
-	if (!buf_pool.is_initialised()) {
-		ut_ad(!srv_was_started);
-	} else if (ulint pending_io = buf_pool.io_pending()) {
-		if (srv_print_verbose_log && count > 600) {
-			ib::info() << "Waiting for " << pending_io << " buffer"
-				" page I/Os to complete";
-			count = 0;
-		}
-
-		goto loop;
 	}
 
 	if (srv_fast_shutdown == 2 || !srv_was_started) {

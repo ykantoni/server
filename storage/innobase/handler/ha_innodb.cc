@@ -525,7 +525,6 @@ static PSI_mutex_info all_innodb_mutexes[] = {
 	PSI_KEY(page_zip_stat_per_index_mutex),
 	PSI_KEY(purge_sys_pq_mutex),
 	PSI_KEY(recv_sys_mutex),
-	PSI_KEY(recv_writer_mutex),
 	PSI_KEY(redo_rseg_mutex),
 	PSI_KEY(noredo_rseg_mutex),
 #  ifdef UNIV_DEBUG
@@ -579,7 +578,6 @@ performance schema instrumented if "UNIV_PFS_THREAD"
 is defined */
 static PSI_thread_info	all_innodb_threads[] = {
 	PSI_KEY(page_cleaner_thread),
-	PSI_KEY(recv_writer_thread),
 	PSI_KEY(trx_rollback_clean_thread),
 	PSI_KEY(thread_pool_thread)
 };
@@ -880,8 +878,7 @@ static SHOW_VAR innodb_status_variables[]= {
    &export_vars.innodb_buffer_pool_pages_dirty, SHOW_SIZE_T},
   {"buffer_pool_bytes_dirty",
    &export_vars.innodb_buffer_pool_bytes_dirty, SHOW_SIZE_T},
-  {"buffer_pool_pages_flushed",
-   &export_vars.innodb_buffer_pool_pages_flushed, SHOW_SIZE_T},
+  {"buffer_pool_pages_flushed", &buf_flush_page_count, SHOW_SIZE_T},
   {"buffer_pool_pages_free",
    &export_vars.innodb_buffer_pool_pages_free, SHOW_SIZE_T},
 #ifdef UNIV_DEBUG
@@ -17968,7 +17965,7 @@ static bool innodb_buffer_pool_evict_uncompressed()
 {
 	bool	all_evicted = true;
 
-	mutex_enter(&buf_pool.mutex);
+	mysql_mutex_lock(&buf_pool.mutex);
 
 	for (buf_block_t* block = UT_LIST_GET_LAST(buf_pool.unzip_LRU);
 	     block != NULL; ) {
@@ -17988,7 +17985,7 @@ static bool innodb_buffer_pool_evict_uncompressed()
 		}
 	}
 
-	mutex_exit(&buf_pool.mutex);
+	mysql_mutex_unlock(&buf_pool.mutex);
 	return(all_evicted);
 }
 
@@ -19065,13 +19062,13 @@ static MYSQL_SYSVAR_ULONG(page_cleaners, deprecated::innodb_page_cleaners,
 static MYSQL_SYSVAR_DOUBLE(max_dirty_pages_pct, srv_max_buf_pool_modified_pct,
   PLUGIN_VAR_RQCMDARG,
   "Percentage of dirty pages allowed in bufferpool.",
-  NULL, innodb_max_dirty_pages_pct_update, 75.0, 0, 99.999, 0);
+  NULL, innodb_max_dirty_pages_pct_update, 90.0, 0, 99.999, 0);
 
 static MYSQL_SYSVAR_DOUBLE(max_dirty_pages_pct_lwm,
   srv_max_dirty_pages_pct_lwm,
   PLUGIN_VAR_RQCMDARG,
   "Percentage of dirty pages at which flushing kicks in.",
-  NULL, innodb_max_dirty_pages_pct_lwm_update, 0, 0, 99.999, 0);
+  NULL, innodb_max_dirty_pages_pct_lwm_update, 75.0, 0, 99.999, 0);
 
 static MYSQL_SYSVAR_DOUBLE(adaptive_flushing_lwm,
   srv_adaptive_flushing_lwm,
@@ -19236,13 +19233,6 @@ static MYSQL_SYSVAR_ULONG(buffer_pool_chunk_size, srv_buf_pool_chunk_unit,
   NULL, NULL,
   128 * 1024 * 1024, 1024 * 1024, LONG_MAX, 1024 * 1024);
 
-#if defined UNIV_DEBUG || defined UNIV_PERF_DEBUG
-static MYSQL_SYSVAR_ULONG(doublewrite_batch_size, srv_doublewrite_batch_size,
-  PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
-  "Number of pages reserved in doublewrite buffer for batch flushing",
-  NULL, NULL, 120, 1, 127, 0);
-#endif /* defined UNIV_DEBUG || defined UNIV_PERF_DEBUG */
-
 static MYSQL_SYSVAR_ENUM(lock_schedule_algorithm, innodb_lock_schedule_algorithm,
   PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
   "The algorithm Innodb uses for deciding which locks to grant next when"
@@ -19366,7 +19356,12 @@ static MYSQL_SYSVAR_UINT(defragment_frequency, srv_defragment_frequency,
 static MYSQL_SYSVAR_ULONG(lru_scan_depth, srv_LRU_scan_depth,
   PLUGIN_VAR_RQCMDARG,
   "How deep to scan LRU to keep it clean",
-  NULL, NULL, 1024, 100, ~0UL, 0);
+  NULL, NULL, 1536, 100, ~0UL, 0);
+
+static MYSQL_SYSVAR_SIZE_T(lru_flush_size, innodb_lru_flush_size,
+  PLUGIN_VAR_RQCMDARG,
+  "How many pages to flush on LRU eviction",
+  NULL, NULL, 32, 1, SIZE_T_MAX, 0);
 
 static MYSQL_SYSVAR_ULONG(flush_neighbors, srv_flush_neighbors,
   PLUGIN_VAR_OPCMDARG,
@@ -19996,6 +19991,7 @@ static struct st_mysql_sys_var* innobase_system_variables[]= {
   MYSQL_SYSVAR(defragment_fill_factor_n_recs),
   MYSQL_SYSVAR(defragment_frequency),
   MYSQL_SYSVAR(lru_scan_depth),
+  MYSQL_SYSVAR(lru_flush_size),
   MYSQL_SYSVAR(flush_neighbors),
   MYSQL_SYSVAR(checksum_algorithm),
   MYSQL_SYSVAR(log_checksums),
@@ -20117,9 +20113,6 @@ static struct st_mysql_sys_var* innobase_system_variables[]= {
   MYSQL_SYSVAR(buf_flush_list_now),
   MYSQL_SYSVAR(merge_threshold_set_all_debug),
 #endif /* UNIV_DEBUG */
-#if defined UNIV_DEBUG || defined UNIV_PERF_DEBUG
-  MYSQL_SYSVAR(doublewrite_batch_size),
-#endif /* defined UNIV_DEBUG || defined UNIV_PERF_DEBUG */
   MYSQL_SYSVAR(status_output),
   MYSQL_SYSVAR(status_output_locks),
   MYSQL_SYSVAR(print_all_deadlocks),
@@ -21193,10 +21186,10 @@ innodb_buffer_pool_size_validate(
 #endif /* UNIV_DEBUG */
 
 
-	mutex_enter(&buf_pool.mutex);
+	mysql_mutex_lock(&buf_pool.mutex);
 
 	if (srv_buf_pool_old_size != srv_buf_pool_size) {
-		mutex_exit(&buf_pool.mutex);
+		mysql_mutex_unlock(&buf_pool.mutex);
 		my_printf_error(ER_WRONG_ARGUMENTS,
 			"Another buffer pool resize is already in progress.", MYF(0));
 		return(1);
@@ -21207,13 +21200,13 @@ innodb_buffer_pool_size_validate(
 	*static_cast<ulonglong*>(save) = requested_buf_pool_size;
 
 	if (srv_buf_pool_size == ulint(intbuf)) {
-		mutex_exit(&buf_pool.mutex);
+		mysql_mutex_unlock(&buf_pool.mutex);
 		/* nothing to do */
 		return(0);
 	}
 
 	if (srv_buf_pool_size == requested_buf_pool_size) {
-		mutex_exit(&buf_pool.mutex);
+		mysql_mutex_unlock(&buf_pool.mutex);
 		push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
 				    ER_WRONG_ARGUMENTS,
 				    "innodb_buffer_pool_size must be at least"
@@ -21224,7 +21217,7 @@ innodb_buffer_pool_size_validate(
 	}
 
 	srv_buf_pool_size = requested_buf_pool_size;
-	mutex_exit(&buf_pool.mutex);
+	mysql_mutex_unlock(&buf_pool.mutex);
 
 	if (intbuf != static_cast<longlong>(requested_buf_pool_size)) {
 		char	buf[64];

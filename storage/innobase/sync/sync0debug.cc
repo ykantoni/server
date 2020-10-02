@@ -453,10 +453,7 @@ LatchDebug::LatchDebug()
 	LEVEL_MAP_INSERT(RW_LOCK_X);
 	LEVEL_MAP_INSERT(RW_LOCK_NOT_LOCKED);
 	LEVEL_MAP_INSERT(SYNC_ANY_LATCH);
-	LEVEL_MAP_INSERT(SYNC_DOUBLEWRITE);
-	LEVEL_MAP_INSERT(SYNC_BUF_FLUSH_LIST);
 	LEVEL_MAP_INSERT(SYNC_BUF_PAGE_HASH);
-	LEVEL_MAP_INSERT(SYNC_BUF_POOL);
 	LEVEL_MAP_INSERT(SYNC_POOL);
 	LEVEL_MAP_INSERT(SYNC_POOL_MANAGER);
 	LEVEL_MAP_INSERT(SYNC_SEARCH_SYS);
@@ -468,7 +465,6 @@ LatchDebug::LatchDebug()
 	LEVEL_MAP_INSERT(SYNC_RECV);
 	LEVEL_MAP_INSERT(SYNC_LOG_FLUSH_ORDER);
 	LEVEL_MAP_INSERT(SYNC_LOG);
-	LEVEL_MAP_INSERT(SYNC_PAGE_CLEANER);
 	LEVEL_MAP_INSERT(SYNC_PURGE_QUEUE);
 	LEVEL_MAP_INSERT(SYNC_TRX_SYS_HEADER);
 	LEVEL_MAP_INSERT(SYNC_REC_LOCK);
@@ -506,7 +502,6 @@ LatchDebug::LatchDebug()
 	LEVEL_MAP_INSERT(SYNC_FTS_CACHE);
 	LEVEL_MAP_INSERT(SYNC_DICT_OPERATION);
 	LEVEL_MAP_INSERT(SYNC_TRX_I_S_RWLOCK);
-	LEVEL_MAP_INSERT(SYNC_RECV_WRITER);
 	LEVEL_MAP_INSERT(SYNC_LEVEL_VARYING);
 	LEVEL_MAP_INSERT(SYNC_NO_ORDER_CHECK);
 
@@ -743,10 +738,8 @@ LatchDebug::check_order(
 	case SYNC_FTS_OPTIMIZE:
 	case SYNC_FTS_CACHE:
 	case SYNC_FTS_CACHE_INIT:
-	case SYNC_PAGE_CLEANER:
 	case SYNC_LOG:
 	case SYNC_LOG_FLUSH_ORDER:
-	case SYNC_DOUBLEWRITE:
 	case SYNC_SEARCH_SYS:
 	case SYNC_LOCK_SYS:
 	case SYNC_LOCK_WAIT_SYS:
@@ -766,7 +759,6 @@ LatchDebug::check_order(
 	case SYNC_STATS_AUTO_RECALC:
 	case SYNC_POOL:
 	case SYNC_POOL_MANAGER:
-	case SYNC_RECV_WRITER:
 	case SYNC_BUF_PAGE_HASH:
 		basic_check(latches, level, level);
 		break;
@@ -804,15 +796,6 @@ LatchDebug::check_order(
 			basic_check(latches, level, level - 1);
 			ut_a(find(latches, SYNC_LOCK_SYS) != 0);
 		}
-		break;
-
-	case SYNC_BUF_FLUSH_LIST:
-	case SYNC_BUF_POOL:
-
-		/* We can have multiple mutexes of this type therefore we
-		can only check whether the greater than condition holds. */
-
-		basic_check(latches, level, level - 1);
 		break;
 
 	case SYNC_REC_LOCK:
@@ -1173,8 +1156,7 @@ sync_check_iterate(const sync_check_functor_t& functor)
 
 Note: We don't enforce any synchronisation checks. The caller must ensure
 that no races can occur */
-void
-sync_check_enable()
+static void sync_check_enable()
 {
 	if (!srv_sync_debug) {
 
@@ -1247,16 +1229,12 @@ sync_latch_meta_init()
 	/* The latches should be ordered on latch_id_t. So that we can
 	index directly into the vector to update and fetch meta-data. */
 
-	LATCH_ADD_MUTEX(BUF_POOL, SYNC_BUF_POOL, buf_pool_mutex_key);
-
 	LATCH_ADD_MUTEX(DICT_FOREIGN_ERR, SYNC_NO_ORDER_CHECK,
 			dict_foreign_err_mutex_key);
 
 	LATCH_ADD_MUTEX(DICT_SYS, SYNC_DICT, dict_sys_mutex_key);
 
 	LATCH_ADD_MUTEX(FIL_SYSTEM, SYNC_ANY_LATCH, fil_system_mutex_key);
-
-	LATCH_ADD_MUTEX(FLUSH_LIST, SYNC_BUF_FLUSH_LIST, flush_list_mutex_key);
 
 	LATCH_ADD_MUTEX(FTS_BG_THREADS, SYNC_FTS_BG_THREADS,
 			fts_bg_threads_mutex_key);
@@ -1281,9 +1259,6 @@ sync_latch_meta_init()
 	LATCH_ADD_MUTEX(LOG_FLUSH_ORDER, SYNC_LOG_FLUSH_ORDER,
 			log_flush_order_mutex_key);
 
-	LATCH_ADD_MUTEX(PAGE_CLEANER, SYNC_PAGE_CLEANER,
-			page_cleaner_mutex_key);
-
 	LATCH_ADD_MUTEX(PURGE_SYS_PQ, SYNC_PURGE_QUEUE,
 			purge_sys_pq_mutex_key);
 
@@ -1291,8 +1266,6 @@ sync_latch_meta_init()
 			recalc_pool_mutex_key);
 
 	LATCH_ADD_MUTEX(RECV_SYS, SYNC_RECV, recv_sys_mutex_key);
-
-	LATCH_ADD_MUTEX(RECV_WRITER, SYNC_RECV_WRITER, recv_writer_mutex_key);
 
 	LATCH_ADD_MUTEX(REDO_RSEG, SYNC_REDO_RSEG, redo_rseg_mutex_key);
 
@@ -1325,8 +1298,6 @@ sync_latch_meta_init()
 
 	LATCH_ADD_MUTEX(SRV_MONITOR_FILE, SYNC_NO_ORDER_CHECK,
 			srv_monitor_file_mutex_key);
-
-	LATCH_ADD_MUTEX(BUF_DBLWR, SYNC_DOUBLEWRITE, buf_dblwr_mutex_key);
 
 	LATCH_ADD_MUTEX(TRX_POOL, SYNC_POOL, trx_pool_mutex_key);
 
@@ -1462,6 +1433,8 @@ sync_check_init()
 	ut_d(LatchDebug::init());
 
 	sync_array_init();
+
+	ut_d(sync_check_enable());
 }
 
 /** Free the InnoDB synchronization data structures. */
