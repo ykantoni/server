@@ -46,7 +46,6 @@ Created 10/25/1995 Heikki Tuuri
 #include "trx0purge.h"
 #include "buf0lru.h"
 #include "ibuf0ibuf.h"
-#include "os0event.h"
 #include "sync0sync.h"
 #include "buf0flu.h"
 #include "os0api.h"
@@ -1057,10 +1056,10 @@ fil_space_free(
 		}
 
 		if (!recv_recovery_is_on()) {
-			log_mutex_enter();
+			mysql_mutex_lock(&log_sys.mutex);
 		}
 
-		ut_ad(log_mutex_own());
+		mysql_mutex_assert_owner(&log_sys.mutex);
 
 		if (space->max_lsn != 0) {
 			ut_d(space->max_lsn = 0);
@@ -1068,7 +1067,7 @@ fil_space_free(
 		}
 
 		if (!recv_recovery_is_on()) {
-			log_mutex_exit();
+			mysql_mutex_unlock(&log_sys.mutex);
 		}
 
 		fil_space_free_low(space);
@@ -1178,20 +1177,21 @@ fil_space_create(
 		fil_system.max_assigned_id = id;
 	}
 
-	/* Inform key rotation that there could be something
-	to do */
-	if (purpose == FIL_TYPE_TABLESPACE
-	    && !srv_fil_crypt_rotate_key_age && fil_crypt_threads_event &&
-	    (mode == FIL_ENCRYPTION_ON || mode == FIL_ENCRYPTION_OFF
-	     || srv_encrypt_tables)) {
-		/* Key rotation is not enabled, need to inform background
-		encryption threads. */
+	const bool rotate= purpose == FIL_TYPE_TABLESPACE
+		&& (mode == FIL_ENCRYPTION_ON || mode == FIL_ENCRYPTION_OFF
+		    || srv_encrypt_tables)
+		&& !srv_fil_crypt_rotate_key_age
+		&& srv_n_fil_crypt_threads_started;
+
+	if (rotate) {
 		fil_system.rotation_list.push_back(*space);
 		space->is_in_rotation_list = true;
-		mutex_exit(&fil_system.mutex);
-		os_event_set(fil_crypt_threads_event);
-	} else {
-		mutex_exit(&fil_system.mutex);
+	}
+
+	mutex_exit(&fil_system.mutex);
+
+	if (rotate) {
+		fil_crypt_threads_signal();
 	}
 
 	return(space);
@@ -2233,14 +2233,14 @@ dberr_t fil_delete_tablespace(ulint id, bool if_exists,
 		}
 		mutex_exit(&fil_system.mutex);
 
-		log_mutex_enter();
+		mysql_mutex_lock(&log_sys.mutex);
 
 		if (space->max_lsn != 0) {
 			ut_d(space->max_lsn = 0);
 			UT_LIST_REMOVE(fil_system.named_spaces, space);
 		}
 
-		log_mutex_exit();
+		mysql_mutex_unlock(&log_sys.mutex);
 		fil_space_free_low(space);
 
 		if (!os_file_delete(innodb_data_file_key, path)
@@ -2521,11 +2521,11 @@ fil_rename_tablespace(
 
 	if (!recv_recovery_is_on()) {
 		fil_name_write_rename(id, old_file_name, new_file_name);
-		log_mutex_enter();
+		mysql_mutex_lock(&log_sys.mutex);
 	}
 
 	/* log_sys.mutex is above fil_system.mutex in the latching order */
-	ut_ad(log_mutex_own());
+	mysql_mutex_assert_owner(&log_sys.mutex);
 	mutex_enter(&fil_system.mutex);
 	space->release();
 	ut_ad(space->name == old_space_name);
@@ -2547,7 +2547,7 @@ skip_second_rename:
 	}
 
 	if (!recv_recovery_is_on()) {
-		log_mutex_exit();
+		mysql_mutex_unlock(&log_sys.mutex);
 	}
 
 	ut_ad(space->name == old_space_name);
@@ -3968,7 +3968,7 @@ write_completed:
   if (dberr_t err= buf_page_read_complete(bpage, *node))
   {
     if (recv_recovery_is_on() && !srv_force_recovery)
-      recv_sys.found_corrupt_fs= true;
+      recv_sys.set_corrupt_fs();
 
     ib::error() << "Failed to read page " << id.page_no()
                 << " from file '" << node->name << "': " << err;
@@ -4222,7 +4222,7 @@ void
 fil_names_dirty(
 	fil_space_t*	space)
 {
-	ut_ad(log_mutex_own());
+	mysql_mutex_assert_owner(&log_sys.mutex);
 	ut_ad(recv_recovery_is_on());
 	ut_ad(log_sys.get_lsn() != 0);
 	ut_ad(space->max_lsn == 0);
@@ -4238,7 +4238,7 @@ fil_names_clear().
 @param[in,out]	space	tablespace */
 void fil_names_dirty_and_write(fil_space_t* space)
 {
-	ut_ad(log_mutex_own());
+	mysql_mutex_assert_owner(&log_sys.mutex);
 	ut_d(fil_space_validate_for_mtr_commit(space));
 	ut_ad(space->max_lsn == log_sys.get_lsn());
 
@@ -4279,7 +4279,7 @@ fil_names_clear(
 		mtr_checkpoint_size = 75 * 1024;
 		);
 
-	ut_ad(log_mutex_own());
+	mysql_mutex_assert_owner(&log_sys.mutex);
 	ut_ad(lsn);
 
 	mtr.start();

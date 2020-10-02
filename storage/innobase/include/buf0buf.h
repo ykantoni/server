@@ -35,6 +35,7 @@ Created 11/5/1995 Heikki Tuuri
 #include "buf0types.h"
 #include "span.h"
 #include "assume_aligned.h"
+#include "buf0types.h"
 #ifndef UNIV_INNOCHECKSUM
 #include "hash0hash.h"
 #include "ut0byte.h"

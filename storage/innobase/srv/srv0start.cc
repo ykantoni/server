@@ -96,7 +96,6 @@ Created 2/16/1996 Heikki Tuuri
 #include "row0row.h"
 #include "row0mysql.h"
 #include "btr0pcur.h"
-#include "os0event.h"
 #include "zlib.h"
 #include "ut0crc32.h"
 
@@ -299,7 +298,7 @@ static dberr_t create_log_file(lsn_t lsn, std::string& logfile0)
 	fil_open_system_tablespace_files();
 
 	/* Create a log checkpoint. */
-	log_mutex_enter();
+	mysql_mutex_lock(&log_sys.mutex);
 	if (log_sys.is_encrypted() && !log_crypt_init()) {
 		return DB_ERROR;
 	}
@@ -324,7 +323,7 @@ static dberr_t create_log_file(lsn_t lsn, std::string& logfile0)
 
 	log_sys.log.write_header_durable(lsn);
 
-	log_mutex_exit();
+	mysql_mutex_unlock(&log_sys.mutex);
 
 	log_make_checkpoint();
 
@@ -350,12 +349,12 @@ static dberr_t create_log_file_rename(lsn_t lsn, std::string &logfile0)
 
   ib::info() << "Renaming log file " << logfile0 << " to " << new_name;
 
-  log_mutex_enter();
+  mysql_mutex_lock(&log_sys.mutex);
   ut_ad(logfile0.size() == 2 + new_name.size());
   logfile0= new_name;
   dberr_t err= log_sys.log.rename(std::move(new_name));
 
-  log_mutex_exit();
+  mysql_mutex_unlock(&log_sys.mutex);
 
   DBUG_EXECUTE_IF("innodb_log_abort_10", err= DB_ERROR;);
 
@@ -830,7 +829,7 @@ srv_shutdown_all_bg_threads()
 {
 	ut_ad(!srv_undo_sources);
 	srv_shutdown_state = SRV_SHUTDOWN_EXIT_THREADS;
-
+	ut_d(srv_master_thread_enable());
 	lock_sys.timeout_timer.reset();
 	srv_master_timer.reset();
 
@@ -838,9 +837,7 @@ srv_shutdown_all_bg_threads()
 		srv_purge_shutdown();
 	}
 
-	/* All threads end up waiting for certain events. Put those events
-	to the signaled state. Then the threads will exit themselves after
-	os_event_wait(). */
+	/* Signal any waiting threads. */
 	for (uint i = 0; i < 1000; ++i) {
 		/* NOTE: IF YOU CREATE THREADS IN INNODB, YOU MUST EXIT THEM
 		HERE OR EARLIER */
@@ -849,7 +846,7 @@ srv_shutdown_all_bg_threads()
 			/* b. srv error monitor thread exits automatically,
 			no need to do anything here */
 			if (srv_n_fil_crypt_threads_started) {
-				os_event_set(fil_crypt_threads_event);
+				fil_crypt_threads_signal(true);
 			}
 		}
 
@@ -942,7 +939,7 @@ static lsn_t srv_prepare_to_delete_redo_log_file(bool old_exists)
 		DBUG_EXECUTE_IF("innodb_log_abort_1", DBUG_RETURN(0););
 		DBUG_PRINT("ib_log", ("After innodb_log_abort_1"));
 
-		log_mutex_enter();
+		mysql_mutex_lock(&log_sys.mutex);
 
 		fil_names_clear(log_sys.get_lsn(), false);
 
@@ -981,7 +978,7 @@ static lsn_t srv_prepare_to_delete_redo_log_file(bool old_exists)
 			     << " bytes; LSN=" << flushed_lsn;
 		}
 
-		log_mutex_exit();
+		mysql_mutex_unlock(&log_sys.mutex);
 
 		if (flushed_lsn != log_sys.get_flushed_lsn()) {
 			log_write_up_to(flushed_lsn, false);
@@ -1509,8 +1506,8 @@ file_checked:
 
 			recv_sys.apply(true);
 
-			if (recv_sys.found_corrupt_log
-			    || recv_sys.found_corrupt_fs) {
+			if (recv_sys.is_corrupt_log()
+			    || recv_sys.is_corrupt_fs()) {
 				return(srv_init_abort(DB_CORRUPTION));
 			}
 
@@ -1954,7 +1951,7 @@ skip_monitors:
 		/* Create thread(s) that handles key rotation. This is
 		needed already here as log_preflush_pool_modified_pages
 		will flush dirty pages and that might need e.g.
-		fil_crypt_threads_event. */
+		fil_crypt_threads_cond. */
 		fil_system_enter();
 		fil_crypt_threads_init();
 		fil_system_exit();
@@ -1971,6 +1968,7 @@ skip_monitors:
 /** Shut down background threads that can generate undo log. */
 void srv_shutdown_bg_undo_sources()
 {
+	ut_d(srv_master_thread_enable());
 	if (srv_undo_sources) {
 		ut_ad(!srv_read_only_mode);
 		srv_shutdown_state = SRV_SHUTDOWN_INITIATED;
