@@ -165,8 +165,6 @@ enum latch_level_t {
 	RW_LOCK_X,
 	RW_LOCK_NOT_LOCKED,
 
-	SYNC_ANY_LATCH,
-
 	SYNC_BUF_PAGE_HASH,
 
 	SYNC_SEARCH_SYS,

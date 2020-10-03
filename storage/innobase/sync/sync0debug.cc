@@ -65,6 +65,41 @@ struct Latched
   latch_level_t level= SYNC_UNKNOWN;
 };
 
+/** RW-lock rank names */
+static const char *const level_names[SYNC_LEVEL_MAX + 1]= {
+  "SYNC_UNKNOWN",
+  "RW_LOCK_SX",
+  "RW_LOCK_X_WAIT",
+  "RW_LOCK_S",
+  "RW_LOCK_X",
+  "RW_LOCK_NOT_LOCKED",
+  "SYNC_BUF_PAGE_HASH",
+  "SYNC_SEARCH_SYS",
+  "SYNC_TRX_SYS_HEADER",
+  "SYNC_REC_LOCK",
+  "SYNC_IBUF_BITMAP",
+  "SYNC_IBUF_TREE_NODE",
+  "SYNC_IBUF_TREE_NODE_NEW",
+  "SYNC_IBUF_INDEX_TREE",
+  "SYNC_FSP_PAGE",
+  "SYNC_FSP",
+  "SYNC_EXTERN_STORAGE",
+  "SYNC_TRX_UNDO_PAGE",
+  "SYNC_RSEG_HEADER",
+  "SYNC_RSEG_HEADER_NEW",
+  "SYNC_PURGE_LATCH",
+  "SYNC_TREE_NODE",
+  "SYNC_TREE_NODE_FROM_HASH",
+  "SYNC_TREE_NODE_NEW",
+  "SYNC_INDEX_TREE",
+  "SYNC_IBUF_HEADER",
+  "SYNC_DICT_HEADER",
+  "SYNC_DICT_OPERATION",
+  "SYNC_TRX_I_S_RWLOCK",
+  "SYNC_LEVEL_VARYING",
+  "SYNC_NO_ORDER_CHECK"
+};
+
 /** Thread specific latches. This is ordered on level in descending order. */
 typedef std::vector<Latched, ut_allocator<Latched> > Latches;
 
@@ -268,41 +303,9 @@ struct LatchDebug {
   @return level name */
   static const char *get_level_name(latch_level_t level)
   {
-    switch (level) {
-    case SYNC_UNKNOWN: return "SYNC_UNKNOWN";
-    case RW_LOCK_SX: return "RW_LOCK_SX";
-    case RW_LOCK_X_WAIT: return "RW_LOCK_X_WAIT";
-    case RW_LOCK_S: return "RW_LOCK_S";
-    case RW_LOCK_X: return "RW_LOCK_X";
-    case RW_LOCK_NOT_LOCKED: return "RW_LOCK_NOT_LOCKED";
-    case SYNC_ANY_LATCH: return "SYNC_ANY_LATCH";
-    case SYNC_BUF_PAGE_HASH: return "SYNC_BUF_PAGE_HASH";
-    case SYNC_SEARCH_SYS: return "SYNC_SEARCH_SYS";
-    case SYNC_TRX_SYS_HEADER: return "SYNC_TRX_SYS_HEADER";
-    case SYNC_REC_LOCK: return "SYNC_REC_LOCK";
-    case SYNC_IBUF_BITMAP: return "SYNC_IBUF_BITMAP";
-    case SYNC_IBUF_TREE_NODE: return "SYNC_IBUF_TREE_NODE";
-    case SYNC_IBUF_TREE_NODE_NEW: return "SYNC_IBUF_TREE_NODE_NEW";
-    case SYNC_IBUF_INDEX_TREE: return "SYNC_IBUF_INDEX_TREE";
-    case SYNC_FSP_PAGE: return "SYNC_FSP_PAGE";
-    case SYNC_FSP: return "SYNC_FSP";
-    case SYNC_EXTERN_STORAGE: return "SYNC_EXTERN_STORAGE";
-    case SYNC_TRX_UNDO_PAGE: return "SYNC_TRX_UNDO_PAGE";
-    case SYNC_RSEG_HEADER: return "SYNC_RSEG_HEADER";
-    case SYNC_RSEG_HEADER_NEW: return "SYNC_RSEG_HEADER_NEW";
-    case SYNC_PURGE_LATCH: return "SYNC_PURGE_LATCH";
-    case SYNC_TREE_NODE: return "SYNC_TREE_NODE";
-    case SYNC_TREE_NODE_FROM_HASH: return "SYNC_TREE_NODE_FROM_HASH";
-    case SYNC_TREE_NODE_NEW: return "SYNC_TREE_NODE_NEW";
-    case SYNC_INDEX_TREE: return "SYNC_INDEX_TREE";
-    case SYNC_IBUF_HEADER: return "SYNC_IBUF_HEADER";
-    case SYNC_DICT_HEADER: return "SYNC_DICT_HEADER";
-    case SYNC_DICT_OPERATION: return "SYNC_DICT_OPERATION";
-    case SYNC_TRX_I_S_RWLOCK: return "SYNC_TRX_I_S_RWLOCK";
-    case SYNC_LEVEL_VARYING: return "SYNC_LEVEL_VARYING";
-    case SYNC_NO_ORDER_CHECK: return "SYNC_NO_ORDER_CHECK";
-    }
-    abort();
+    static_assert(array_elements(level_names) == SYNC_LEVEL_MAX + 1, "size");
+    ut_ad(level <= SYNC_LEVEL_MAX);
+    return level_names[level];
   }
 
 private:
@@ -551,7 +554,6 @@ LatchDebug::check_order(
 	case SYNC_DICT_HEADER:
 	case SYNC_TRX_I_S_RWLOCK:
 	case SYNC_BUF_PAGE_HASH:
-	case SYNC_ANY_LATCH:
 		basic_check(latches, level, level);
 		break;
 
