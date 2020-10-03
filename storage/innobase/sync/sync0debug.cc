@@ -34,7 +34,7 @@ Created 2012-08-21 Sunny Bains
 #include "sync0sync.h"
 #include "sync0arr.h"
 #include "srv0start.h"
-#include "lock0lock.h"
+#include "fil0fil.h"
 
 #include <vector>
 #include <algorithm>
@@ -75,7 +75,6 @@ static const char *const level_names[SYNC_LEVEL_MAX + 1]= {
   "RW_LOCK_NOT_LOCKED",
   "SYNC_SEARCH_SYS",
   "SYNC_TRX_SYS_HEADER",
-  "SYNC_REC_LOCK",
   "SYNC_IBUF_BITMAP",
   "SYNC_IBUF_TREE_NODE",
   "SYNC_IBUF_TREE_NODE_NEW",
@@ -553,15 +552,6 @@ LatchDebug::check_order(
 	case SYNC_DICT_HEADER:
 	case SYNC_TRX_I_S_RWLOCK:
 		basic_check(latches, level, level);
-		break;
-
-	case SYNC_REC_LOCK:
-		basic_check(latches, level, SYNC_REC_LOCK - 1);
-#ifdef SAFE_MUTEX
-		if (!mysql_mutex_is_owner(&lock_sys.mutex)) {
-			basic_check(latches, level, SYNC_REC_LOCK);
-		}
-#endif /* SAFE_MUTEX */
 		break;
 
 	case SYNC_IBUF_BITMAP:
