@@ -73,7 +73,6 @@ static const char *const level_names[SYNC_LEVEL_MAX + 1]= {
   "RW_LOCK_S",
   "RW_LOCK_X",
   "RW_LOCK_NOT_LOCKED",
-  "SYNC_BUF_PAGE_HASH",
   "SYNC_SEARCH_SYS",
   "SYNC_TRX_SYS_HEADER",
   "SYNC_REC_LOCK",
@@ -553,7 +552,6 @@ LatchDebug::check_order(
 	case SYNC_DICT_OPERATION:
 	case SYNC_DICT_HEADER:
 	case SYNC_TRX_I_S_RWLOCK:
-	case SYNC_BUF_PAGE_HASH:
 		basic_check(latches, level, level);
 		break;
 
