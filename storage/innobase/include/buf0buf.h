@@ -32,7 +32,6 @@ Created 11/5/1995 Heikki Tuuri
 
 #include "fil0fil.h"
 #include "mtr0types.h"
-#include "buf0types.h"
 #include "span.h"
 #include "assume_aligned.h"
 #include "buf0types.h"
