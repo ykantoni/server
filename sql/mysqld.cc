@@ -5195,9 +5195,10 @@ static int init_server_components()
   }
 
   if (ha_recover(0))
-  {
     unireg_abort(1);
-  }
+
+  if (ddl_log_initialize())
+    unireg_abort(1);
 
   if (opt_bin_log)
   {
@@ -5598,7 +5599,8 @@ int mysqld_main(int argc, char **argv)
 
   initialize_information_schema_acl();
 
-  ddl_log_execute_recovery();
+  if (ddl_log_execute_recovery() > 0)
+    unireg_abort(1);
 
   /*
     Change EVENTS_ORIGINAL to EVENTS_OFF (the default value) as there is no

@@ -41,6 +41,7 @@ int maria_rename(const char *old_name, const char *new_name)
   MARIA_HA *info;
   MARIA_SHARE *share;
   myf sync_dir;
+  my_bool ddl_recovery= 0;
   DBUG_ENTER("maria_rename");
 
 #ifdef EXTRA_DEBUG
@@ -49,7 +50,28 @@ int maria_rename(const char *old_name, const char *new_name)
 #endif
   /** @todo LOCK take X-lock on table */
   if (!(info= maria_open(old_name, O_RDWR, HA_OPEN_FOR_REPAIR, 0)))
-    DBUG_RETURN(my_errno);
+  {
+    int error= my_errno;
+    /*
+      Check if we are in recovery from a rename that failed in the middle
+      and we are now renaming things back.
+    */
+    if (error == ENOENT)
+    {
+      char *index_file= from;
+      char *data_file= to;
+      fn_format(index_file, old_name, "", MARIA_NAME_IEXT,
+                MY_UNPACK_FILENAME | MY_APPEND_EXT);
+      fn_format(data_file, old_name, "", MARIA_NAME_DEXT,
+                MY_UNPACK_FILENAME | MY_APPEND_EXT);
+      if (!access(data_file, F_OK) && access(index_file, F_OK))
+      {
+        ddl_recovery= 1;
+        goto forced_rename;
+      }
+    }
+    DBUG_RETURN(error);
+  }
   share= info->s;
 #ifdef USE_RAID
   raid_type =      share->base.raid_type;
@@ -106,6 +128,7 @@ int maria_rename(const char *old_name, const char *new_name)
   _ma_reset_state(info);
   maria_close(info);
 
+forced_rename:
   fn_format(from,old_name,"",MARIA_NAME_IEXT,MY_UNPACK_FILENAME|MY_APPEND_EXT);
   fn_format(to,new_name,"",MARIA_NAME_IEXT,MY_UNPACK_FILENAME|MY_APPEND_EXT);
   if (mysql_file_rename_with_symlink(key_file_kfile, from, to,
@@ -116,7 +139,7 @@ int maria_rename(const char *old_name, const char *new_name)
   data_file_rename_error=
       mysql_file_rename_with_symlink(key_file_dfile, from, to,
                                      MYF(MY_WME | sync_dir));
-  if (data_file_rename_error)
+  if (data_file_rename_error && ! ddl_recovery)
   {
     /*
       now we have a renamed index file and a non-renamed data file, try to
@@ -129,5 +152,4 @@ int maria_rename(const char *old_name, const char *new_name)
                                    MYF(MY_WME | sync_dir));
   }
   DBUG_RETURN(data_file_rename_error);
-
 }
