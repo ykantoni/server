@@ -135,7 +135,6 @@ public:
 
 static io_slots *read_slots;
 static io_slots *write_slots;
-static io_slots *ibuf_slots;
 
 /** Number of retries for partial I/O's */
 constexpr ulint NUM_RETRIES_ON_PARTIAL_IO = 10;
@@ -3141,14 +3140,7 @@ os_file_io(
 
 			bytes_returned += n_bytes;
 
-			if (offset > 0
-			    && type.is_write()
-			    && type.punch_hole()) {
-				*err = type.punch_hole(file, offset, n);
-
-			} else {
-				*err = DB_SUCCESS;
-			}
+			*err = type.maybe_punch_hole(offset, n);
 
 			return(original_n);
 		}
@@ -3159,8 +3151,7 @@ os_file_io(
 
 		bytes_returned += n_bytes;
 
-		if (!type.is_partial_io_warning_disabled()) {
-
+		if (type.type != IORequest::READ_MAYBE_PARTIAL) {
 			const char*	op = type.is_read()
 				? "read" : "written";
 
@@ -3178,7 +3169,7 @@ os_file_io(
 
 	*err = DB_IO_ERROR;
 
-	if (!type.is_partial_io_warning_disabled()) {
+	if (type.type != IORequest::READ_MAYBE_PARTIAL) {
 		ib::warn()
 			<< "Retry attempts for "
 			<< (type.is_read() ? "reading" : "writing")
@@ -3206,7 +3197,6 @@ os_file_pwrite(
 	os_offset_t		offset,
 	dberr_t*		err)
 {
-	ut_ad(type.validate());
 	ut_ad(type.is_write());
 
 	++os_n_file_writes;
@@ -3240,7 +3230,6 @@ os_file_write_func(
 {
 	dberr_t		err;
 
-	ut_ad(type.validate());
 	ut_ad(n > 0);
 
 	WAIT_ALLOW_WRITES();
@@ -3330,7 +3319,6 @@ os_file_read_page(
 
 	os_bytes_read_since_printout += n;
 
-	ut_ad(type.validate());
 	ut_ad(n > 0);
 
 	ssize_t	n_bytes = os_file_pread(type, file, buf, n, offset, &err);
@@ -3655,13 +3643,9 @@ fallback:
 			n_bytes = buf_size;
 		}
 
-		dberr_t		err;
-		IORequest	request(IORequest::WRITE);
-
-		err = os_file_write(
-			request, name, file, buf, current_size, n_bytes);
-
-		if (err != DB_SUCCESS) {
+		if (os_file_write(IORequestWrite, name,
+				  file, buf, current_size, n_bytes) !=
+		    DB_SUCCESS) {
 			break;
 		}
 
@@ -3784,18 +3768,11 @@ os_file_punch_hole(
 #endif /* _WIN32 */
 }
 
-inline bool IORequest::should_punch_hole() const
-{
-	return m_fil_node && m_fil_node->space->punch_hole;
-}
-
 /** Free storage space associated with a section of the file.
-@param[in]	fh		Open file handle
-@param[in]	off		Starting offset (SEEK_SET)
-@param[in]	len		Size of the hole
+@param off   byte offset from the start (SEEK_SET)
+@param len   size of the hole in bytes
 @return DB_SUCCESS or error code */
-dberr_t
-IORequest::punch_hole(os_file_t fh, os_offset_t off, ulint len)
+dberr_t IORequest::punch_hole(os_offset_t off, ulint len) const
 {
 	/* In this debugging mode, we act as if punch hole is supported,
 	and then skip any calls to actually punch a hole here.
@@ -3804,7 +3781,7 @@ IORequest::punch_hole(os_file_t fh, os_offset_t off, ulint len)
 		return(DB_SUCCESS);
 	);
 
-	ulint trim_len = get_trim_length(len);
+	ulint trim_len = bpage ? bpage->physical_size() - len : 0;
 
 	if (trim_len == 0) {
 		return(DB_SUCCESS);
@@ -3814,11 +3791,11 @@ IORequest::punch_hole(os_file_t fh, os_offset_t off, ulint len)
 
 	/* Check does file system support punching holes for this
 	tablespace. */
-	if (!should_punch_hole()) {
+	if (!node->space->punch_hole) {
 		return DB_IO_NO_PUNCH_HOLE;
 	}
 
-	dberr_t err = os_file_punch_hole(fh, off, trim_len);
+	dberr_t err = os_file_punch_hole(node->handle, off, trim_len);
 
 	if (err == DB_SUCCESS) {
 		srv_stats.page_compressed_trim_op.inc();
@@ -3826,7 +3803,7 @@ IORequest::punch_hole(os_file_t fh, os_offset_t off, ulint len)
 		/* If punch hole is not supported,
 		set space so that it is not used. */
 		if (err == DB_IO_NO_PUNCH_HOLE) {
-			m_fil_node->space->punch_hole = false;
+			node->space->punch_hole = false;
 			err = DB_SUCCESS;
 		}
 	}
@@ -3883,12 +3860,8 @@ static void io_callback(tpool::aiocb* cb)
 	os_aio_userdata_t data(cb->m_userdata);
 	/* Return cb back to cache*/
 	if (cb->m_opcode == tpool::aio_opcode::AIO_PREAD) {
-		if (read_slots->contains(cb)) {
-			read_slots->release(cb);
-		}	else {
-			ut_ad(ibuf_slots->contains(cb));
-			ibuf_slots->release(cb);
-		}
+		ut_ad(read_slots->contains(cb));
+		read_slots->release(cb);
 	} else	{
 		ut_ad(write_slots->contains(cb));
 		write_slots->release(cb);
@@ -4031,8 +4004,7 @@ bool os_aio_init(ulint n_reader_threads, ulint n_writer_threads, ulint)
 {
   int max_write_events= int(n_writer_threads * OS_AIO_N_PENDING_IOS_PER_THREAD);
   int max_read_events= int(n_reader_threads * OS_AIO_N_PENDING_IOS_PER_THREAD);
-	int max_ibuf_events = 1 * OS_AIO_N_PENDING_IOS_PER_THREAD;
-	int max_events = max_read_events + max_write_events + max_ibuf_events;
+  int max_events = max_read_events + max_write_events;
 	int ret;
 
 #if LINUX_NATIVE_AIO
@@ -4051,7 +4023,6 @@ bool os_aio_init(ulint n_reader_threads, ulint n_writer_threads, ulint)
 	}
 	read_slots = new io_slots(max_read_events, (uint)n_reader_threads);
 	write_slots = new io_slots(max_write_events, (uint)n_writer_threads);
-	ibuf_slots = new io_slots(max_ibuf_events, 1);
 	return true;
 }
 
@@ -4060,10 +4031,8 @@ void os_aio_free()
   srv_thread_pool->disable_aio();
   delete read_slots;
   delete write_slots;
-  delete ibuf_slots;
   read_slots= nullptr;
   write_slots= nullptr;
-  ibuf_slots= nullptr;
 }
 
 /** Waits until there are no pending writes. There can
@@ -4086,7 +4055,6 @@ void os_aio_wait_until_no_pending_writes()
 NOTE! Use the corresponding macro os_aio(), not directly this function!
 Requests an asynchronous i/o operation.
 @param[in,out]	type		IO request context
-@param[in]	mode		IO mode
 @param[in]	name		Name of the file or path as NUL terminated
 				string
 @param[in]	file		Open file handle
@@ -4104,8 +4072,7 @@ Requests an asynchronous i/o operation.
 @return DB_SUCCESS or error code */
 dberr_t
 os_aio_func(
-	IORequest&	type,
-	ulint		mode,
+	const IORequest&type,
 	const char*	name,
 	pfs_os_file_t	file,
 	void*		buf,
@@ -4124,10 +4091,7 @@ os_aio_func(
 	ut_ad((n & 0xFFFFFFFFUL) == n);
 #endif /* WIN_ASYNC_IO */
 
-	DBUG_EXECUTE_IF("ib_os_aio_func_io_failure_28",
-			mode = OS_AIO_SYNC; os_has_said_disk_full = FALSE;);
-
-	if (mode == OS_AIO_SYNC) {
+	if (!type.is_async()) {
 		if (type.is_read()) {
 			return(os_file_read_func(type, file, buf, offset, n));
 		}
@@ -4138,21 +4102,15 @@ os_aio_func(
 	}
 
 	if (type.is_read()) {
-			++os_n_file_reads;
-	} else if (type.is_write()) {
-			++os_n_file_writes;
+		++os_n_file_reads;
 	} else {
-		ut_error;
+		ut_ad(type.is_write());
+		++os_n_file_writes;
 	}
 
 	compile_time_assert(sizeof(os_aio_userdata_t) <= tpool::MAX_AIO_USERDATA_LEN);
 	os_aio_userdata_t userdata{m1,type,m2};
-	io_slots* slots;
-	if (type.is_read()) {
-		slots = mode == OS_AIO_IBUF?ibuf_slots: read_slots;
-	} else {
-		slots = write_slots;
-	}
+	io_slots* slots= type.is_read() ? read_slots : write_slots;
 	tpool::aiocb* cb = slots->acquire();
 
 	cb->m_buffer = buf;

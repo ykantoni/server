@@ -861,7 +861,7 @@ static bool buf_flush_page(buf_page_t *bpage, bool lru, fil_space_t *space)
   }
 
   size_t size, orig_size;
-  ulint type= IORequest::WRITE;
+  IORequest::Type type= lru ? IORequest::WRITE_LRU : IORequest::WRITE_ASYNC;
 
   if (UNIV_UNLIKELY(!rw_lock)) /* ROW_FORMAT=COMPRESSED */
   {
@@ -898,16 +898,14 @@ static bool buf_flush_page(buf_page_t *bpage, bool lru, fil_space_t *space)
 
 #if defined HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE || defined _WIN32
     if (size != orig_size && space->punch_hole)
-      type|= IORequest::PUNCH_HOLE;
+      type= lru ? IORequest::PUNCH_LRU : IORequest::PUNCH;
 #else
       DBUG_EXECUTE_IF("ignore_punch_hole",
                       if (size != orig_size && space->punch_hole)
-                        type|= IORequest::PUNCH_HOLE;);
+                        type= lru ? IORequest::PUNCH_LRU : IORequest::PUNCH;);
 #endif
     frame= page;
   }
-
-  IORequest request(type, bpage, lru);
 
   ut_ad(status == bpage->status);
 
@@ -924,7 +922,7 @@ static bool buf_flush_page(buf_page_t *bpage, bool lru, fil_space_t *space)
         buf_pool.n_flush_LRU++;
       else
         buf_pool.n_flush_list++;
-      buf_dblwr.add_to_batch(bpage, lru, size);
+      buf_dblwr.add_to_batch(space, bpage, lru, size);
       break;
     }
     /* fall through */
@@ -933,9 +931,8 @@ static bool buf_flush_page(buf_page_t *bpage, bool lru, fil_space_t *space)
       buf_pool.n_flush_LRU++;
     else
       buf_pool.n_flush_list++;
-    /* FIXME: pass space to fil_io() */
-    fil_io(request, false, bpage->id(), bpage->zip_size(), 0,
-           bpage->physical_size(), frame, bpage);
+    fil_io(IORequest(type, bpage), space,
+           bpage->physical_offset(), bpage->physical_size(), frame, bpage);
   }
 
   /* Increment the I/O operation count used for selecting LRU policy. */
@@ -1053,29 +1050,22 @@ static void buf_flush_freed_pages(fil_space_t *space)
 
   for (const auto &range : freed_ranges)
   {
-    ulint page_size= space->zip_size();
-    if (!page_size)
-      page_size= srv_page_size;
+    const ulint physical_size= space->physical_size();
 
     if (punch_hole)
     {
-      const auto len= (range.last - range.first + 1) * page_size;
-      const page_id_t page_id(space->id, range.first);
-      fil_io_t fio= fil_io(IORequestWrite, true, page_id, space->zip_size(),
-                           0, len, nullptr, nullptr, false, true);
+      fil_io_t fio= fil_io(IORequest(IORequest::PUNCH_RANGE), space,
+                           os_offset_t{range.first} * physical_size,
+                           (range.last - range.first + 1) * physical_size,
+                           nullptr, nullptr);
       if (fio.node)
         fio.node->space->release_for_io();
     }
     else if (srv_immediate_scrub_data_uncompressed)
-    {
-      for (auto i= range.first; i <= range.last; i++)
-      {
-        const page_id_t page_id(space->id, i);
-        fil_io(IORequestWrite, false, page_id, space->zip_size(), 0,
-               space->zip_size() ? space->zip_size() : srv_page_size,
-               const_cast<byte*>(field_ref_zero), nullptr, false, false);
-      }
-    }
+      for (os_offset_t i= range.first; i <= range.last; i++)
+        fil_io(IORequest(IORequest::WRITE_ASYNC), space,
+               i * physical_size, physical_size,
+               const_cast<byte*>(field_ref_zero), nullptr);
     buf_pool.stat.n_pages_written+= (range.last - range.first + 1);
   }
 }

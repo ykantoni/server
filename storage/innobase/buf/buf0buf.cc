@@ -4858,17 +4858,4 @@ std::ostream& operator<<(std::ostream &out, const page_id_t page_id)
       << ", page number=" << page_id.page_no() << "]";
   return out;
 }
-
-/**
-Calculate the length of trim (punch_hole) operation.
-@param[in]	bpage		Page control block
-@param[in]	write_length	Write length
-@return length of the trim or zero. */
-ulint
-buf_page_get_trim_length(
-	const buf_page_t*	bpage,
-	ulint			write_length)
-{
-	return bpage->physical_size() - write_length;
-}
 #endif /* !UNIV_INNOCHECKSUM */

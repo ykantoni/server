@@ -368,9 +368,7 @@ void buf_dblwr_t::recover()
       /* The tablespace that this page once belonged to does not exist */
       continue;
 
-    fil_space_open_if_needed(space);
-
-    if (UNIV_UNLIKELY(page_no >= space->size))
+    if (UNIV_UNLIKELY(page_no >= space->get_size()))
     {
       /* Do not report the warning for undo tablespaces, because they
       can be truncated in place. */
@@ -385,7 +383,6 @@ next_page:
     }
 
     const ulint physical_size= space->physical_size();
-    const ulint zip_size= space->zip_size();
     ut_ad(!buf_is_zeroes(span<const byte>(page, physical_size)));
 
     /* We want to ensure that for partial reads the unread portion of
@@ -393,9 +390,9 @@ next_page:
     memset(read_buf, 0x0, physical_size);
 
     /* Read in the actual page from the file */
-    fil_io_t fio= fil_io(IORequest(IORequest::READ | IORequest::DBLWR_RECOVER),
-                         true, page_id, zip_size,
-                         0, physical_size, read_buf, nullptr);
+    fil_io_t fio= fil_io(IORequest(IORequest::DBLWR_RECOVER),
+                         space, os_offset_t{page_no} * physical_size,
+                         physical_size, read_buf, nullptr);
 
     if (UNIV_UNLIKELY(fio.err != DB_SUCCESS))
        ib::warn() << "Double write buffer recovery: " << page_id
@@ -425,8 +422,9 @@ next_page:
 
     /* Write the good page from the doublewrite buffer to the intended
     position. */
-    fio= fil_io(IORequestWrite, true, page_id, zip_size, 0, physical_size,
-                page, nullptr);
+    fio= fil_io(IORequestWrite, space,
+                os_offset_t{page_id.page_no()} * physical_size,
+                physical_size, page, nullptr);
 
     if (fio.node)
     {
@@ -590,7 +588,8 @@ bool buf_dblwr_t::flush_buffered_writes(const ulint size)
   }
 #endif /* UNIV_DEBUG */
   /* Write out the first block of the doublewrite buffer */
-  fil_io_t fio= fil_io(IORequestWrite, true, block1, 0, 0,
+  fil_io_t fio= fil_io(IORequestWrite, fil_system.sys_space,
+                       os_offset_t{block1.page_no()} << srv_page_size_shift,
                        std::min(size, old_first_free) << srv_page_size_shift,
                        write_buf, nullptr);
   fio.node->space->release_for_io();
@@ -598,7 +597,8 @@ bool buf_dblwr_t::flush_buffered_writes(const ulint size)
   if (old_first_free > size)
   {
     /* Write out the second block of the doublewrite buffer. */
-    fio= fil_io(IORequestWrite, true, block2, 0, 0,
+    fio= fil_io(IORequestWrite, fil_system.sys_space,
+                os_offset_t{block2.page_no()} << srv_page_size_shift,
                 (old_first_free - size) << srv_page_size_shift,
                 write_buf + (size << srv_page_size_shift), nullptr);
     fio.node->space->release_for_io();
@@ -630,7 +630,7 @@ bool buf_dblwr_t::flush_buffered_writes(const ulint size)
   {
     auto e= buf_block_arr[i];
     buf_page_t* bpage= e.bpage;
-    ut_a(bpage->in_file());
+    ut_ad(bpage->in_file());
 
     /* We request frame here to get correct buffer in case of
     encryption and/or page compression */
@@ -650,8 +650,10 @@ bool buf_dblwr_t::flush_buffered_writes(const ulint size)
       ut_d(buf_dblwr_check_page_lsn(*bpage, static_cast<const byte*>(frame)));
     }
 
-    fil_io(IORequest(IORequest::WRITE, bpage, e.lru), false,
-           bpage->id(), bpage->zip_size(), 0, e_size, frame, bpage);
+    fil_io(IORequest(e.lru ? IORequest::WRITE_LRU : IORequest::WRITE_ASYNC,
+                     bpage),
+           e.space, bpage->physical_offset(), e_size, frame, bpage);
+    e.space->release_for_io();
   }
 
   return true;
@@ -680,12 +682,17 @@ void buf_dblwr_t::flush_buffered_writes()
 
 /** Schedule a page write. If the doublewrite memory buffer is full,
 flush_buffered_writes() will be invoked to make space.
+@param space      tablespace
 @param bpage      buffer pool page to be written
 @param lru        true=buf_pool.LRU; false=buf_pool.flush_list
 @param size       payload size in bytes */
-void buf_dblwr_t::add_to_batch(buf_page_t *bpage, bool lru, size_t size)
+void buf_dblwr_t::add_to_batch(fil_space_t *space, buf_page_t *bpage, bool lru,
+                               size_t size)
 {
   ut_ad(bpage->in_file());
+  ut_ad(space->id == bpage->id().space());
+  ut_ad(space->pending_io());
+
   const ulint buf_size= 2 * block_size();
 
   mysql_mutex_lock(&mutex);
@@ -713,9 +720,11 @@ void buf_dblwr_t::add_to_batch(buf_page_t *bpage, bool lru, size_t size)
   ut_ad(!bpage->zip_size() || bpage->zip_size() == size);
   ut_ad(reserved == first_free);
   ut_ad(reserved < buf_size);
-  buf_block_arr[first_free++]= { bpage, lru, size };
+  buf_block_arr[first_free++]= { space, bpage, lru, size };
   reserved= first_free;
 
   if (first_free != buf_size || !flush_buffered_writes(buf_size / 2))
     mysql_mutex_unlock(&mutex);
+
+  space->acquire_for_io();
 }

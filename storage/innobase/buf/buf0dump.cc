@@ -644,28 +644,30 @@ buf_load()
 		}
 
 		if (this_space_id != cur_space_id) {
-			if (space != NULL) {
+			if (space) {
 				space->release();
 			}
 
 			cur_space_id = this_space_id;
 			space = fil_space_acquire_silent(cur_space_id);
 
-			if (space != NULL) {
-				zip_size = space->zip_size();
+			if (!space) {
+				continue;
 			}
+
+			zip_size = space->zip_size();
 		}
 
 		/* JAN: TODO: As we use background page read below,
 		if tablespace is encrypted we cant use it. */
-		if (space == NULL ||
-		   (space && space->crypt_data &&
-		    space->crypt_data->encryption != FIL_ENCRYPTION_OFF &&
-		    space->crypt_data->type != CRYPT_SCHEME_UNENCRYPTED)) {
+		if (!space || dump[i].page_no() >= space->get_size() ||
+		    (space->crypt_data &&
+		     space->crypt_data->encryption != FIL_ENCRYPTION_OFF &&
+		     space->crypt_data->type != CRYPT_SCHEME_UNENCRYPTED)) {
 			continue;
 		}
 
-		buf_read_page_background(dump[i], zip_size, true);
+		buf_read_page_background(space, dump[i], zip_size, true);
 
 		if (buf_load_abort_flag) {
 			if (space != NULL) {
