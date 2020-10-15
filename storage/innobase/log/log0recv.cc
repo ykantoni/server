@@ -2520,7 +2520,7 @@ inline buf_block_t *recv_sys_t::recover_low(const page_id_t page_id,
   if (end_lsn < i.lsn)
     DBUG_LOG("ib_log", "skip log for page " << page_id
              << " LSN " << end_lsn << " < " << i.lsn);
-  else if (fil_space_t *space= fil_space_acquire_for_io(page_id.space()))
+  else if (fil_space_t *space= fil_space_t::get_for_io(page_id.space()))
   {
     mtr.start();
     mtr.set_log_mode(MTR_LOG_NO_REDO);

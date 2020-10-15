@@ -125,7 +125,8 @@ too_small:
 
   byte *fseg_header= TRX_SYS_DOUBLEWRITE + TRX_SYS_DOUBLEWRITE_FSEG +
     trx_sys_block->frame;
-  for (uint32_t prev_page_no= 0, i= 0; i < 2 * size + FSP_EXTENT_SIZE / 2; i++)
+  for (uint32_t prev_page_no= 0, i= 0, extent_size= FSP_EXTENT_SIZE;
+       i < 2 * size + extent_size / 2; i++)
   {
     buf_block_t *new_block= fseg_alloc_free_page(fseg_header, prev_page_no + 1,
                                                  FSP_UP, &mtr);
@@ -362,7 +363,7 @@ void buf_dblwr_t::recover()
       continue;
     }
 
-    fil_space_t* space= fil_space_acquire_for_io(space_id);
+    fil_space_t *space= fil_space_t::get_for_io(space_id);
 
     if (!space)
       /* The tablespace that this page once belonged to does not exist */
@@ -399,9 +400,6 @@ next_page:
                   << " (tablespace '" << space->name
                   << "') read failed with error: " << fio.err;
 
-    if (fio.node)
-      space->release_for_io();
-
     if (buf_is_zeroes(span<const byte>(read_buf, physical_size)))
     {
       /* We will check if the copy in the doublewrite buffer is
@@ -422,18 +420,15 @@ next_page:
 
     /* Write the good page from the doublewrite buffer to the intended
     position. */
+    space->reacquire_for_io();
     fio= space->io(IORequestWrite,
                    os_offset_t{page_id.page_no()} * physical_size,
                    physical_size, page);
 
-    if (fio.node)
-    {
-      ut_ad(fio.err == DB_SUCCESS);
+    if (fio.err == DB_SUCCESS)
       ib::info() << "Recovered page " << page_id << " to '" << fio.node->name
                  << "' from the doublewrite buffer.";
-      fio.node->space->release_for_io();
-      goto next_page;
-    }
+    goto next_page;
   }
 
   recv_sys.dblwr.pages.clear();
@@ -511,7 +506,7 @@ static void buf_dblwr_check_page_lsn(const page_t* page, const fil_space_t& s)
 
 static void buf_dblwr_check_page_lsn(const buf_page_t &b, const byte *page)
 {
-  if (fil_space_t *space= fil_space_acquire_for_io(b.id().space()))
+  if (fil_space_t *space= fil_space_t::get_for_io(b.id().space()))
   {
     buf_dblwr_check_page_lsn(page, *space);
     space->release_for_io();
@@ -575,7 +570,7 @@ bool buf_dblwr_t::flush_buffered_writes(const ulint size)
 #ifdef UNIV_DEBUG
   for (ulint len2= 0, i= 0; i < old_first_free; len2 += srv_page_size, i++)
   {
-    buf_page_t *bpage= buf_block_arr[i].bpage;
+    buf_page_t *bpage= buf_block_arr[i].request.bpage;
 
     if (bpage->zip.data)
       /* No simple validate for ROW_FORMAT=COMPRESSED pages exists. */
@@ -588,22 +583,22 @@ bool buf_dblwr_t::flush_buffered_writes(const ulint size)
   }
 #endif /* UNIV_DEBUG */
   /* Write out the first block of the doublewrite buffer */
+  ut_a(fil_system.sys_space->acquire_for_io());
   fil_system.sys_space->io(IORequestWrite,
                            os_offset_t{block1.page_no()} <<
                            srv_page_size_shift,
                            std::min(size, old_first_free) <<
                            srv_page_size_shift, write_buf);
-  fil_system.sys_space->release_for_io();
 
   if (old_first_free > size)
   {
     /* Write out the second block of the doublewrite buffer. */
+    ut_a(fil_system.sys_space->acquire_for_io());
     fil_system.sys_space->io(IORequestWrite,
                              os_offset_t{block2.page_no()} <<
                              srv_page_size_shift,
                              (old_first_free - size) << srv_page_size_shift,
                              write_buf + (size << srv_page_size_shift));
-    fil_system.sys_space->release_for_io();
   }
 
   /* increment the doublewrite flushed pages counter */
@@ -631,7 +626,7 @@ bool buf_dblwr_t::flush_buffered_writes(const ulint size)
   for (ulint i= 0; i < old_first_free; i++)
   {
     auto e= buf_block_arr[i];
-    buf_page_t* bpage= e.bpage;
+    buf_page_t* bpage= e.request.bpage;
     ut_ad(bpage->in_file());
 
     /* We request frame here to get correct buffer in case of
@@ -652,12 +647,7 @@ bool buf_dblwr_t::flush_buffered_writes(const ulint size)
       ut_d(buf_dblwr_check_page_lsn(*bpage, static_cast<const byte*>(frame)));
     }
 
-    e.space->io(IORequest(e.lru
-                          ? IORequest::WRITE_LRU
-                          : IORequest::WRITE_ASYNC,
-                          bpage), bpage->physical_offset(), e_size, frame,
-                bpage);
-    e.space->release_for_io();
+    e.space->io(e.request, bpage->physical_offset(), e_size, frame, bpage);
   }
 
   return true;
@@ -687,15 +677,18 @@ void buf_dblwr_t::flush_buffered_writes()
 /** Schedule a page write. If the doublewrite memory buffer is full,
 flush_buffered_writes() will be invoked to make space.
 @param space      tablespace
-@param bpage      buffer pool page to be written
-@param lru        true=buf_pool.LRU; false=buf_pool.flush_list
+@param request    asynchronous write request
 @param size       payload size in bytes */
-void buf_dblwr_t::add_to_batch(fil_space_t *space, buf_page_t *bpage, bool lru,
+void buf_dblwr_t::add_to_batch(fil_space_t *space, const IORequest &request,
                                size_t size)
 {
-  ut_ad(bpage->in_file());
-  ut_ad(space->id == bpage->id().space());
+  ut_ad(request.is_async());
+  ut_ad(request.is_write());
+  ut_ad(request.bpage);
+  ut_ad(request.bpage->in_file());
+  ut_ad(space->id == request.bpage->id().space());
   ut_ad(space->pending_io());
+  ut_ad(!srv_read_only_mode);
 
   const ulint buf_size= 2 * block_size();
 
@@ -718,17 +711,15 @@ void buf_dblwr_t::add_to_batch(fil_space_t *space, buf_page_t *bpage, bool lru,
 
   /* We request frame here to get correct buffer in case of
   encryption and/or page compression */
-  void *frame= buf_page_get_frame(bpage);
+  void *frame= buf_page_get_frame(request.bpage);
 
   memcpy_aligned<OS_FILE_LOG_BLOCK_SIZE>(p, frame, size);
-  ut_ad(!bpage->zip_size() || bpage->zip_size() == size);
+  ut_ad(!request.bpage->zip_size() || request.bpage->zip_size() == size);
   ut_ad(reserved == first_free);
   ut_ad(reserved < buf_size);
-  buf_block_arr[first_free++]= { space, bpage, lru, size };
+  new (buf_block_arr + first_free++) element{space, request, size};
   reserved= first_free;
 
   if (first_free != buf_size || !flush_buffered_writes(buf_size / 2))
     mysql_mutex_unlock(&mutex);
-
-  space->acquire_for_io();
 }

@@ -204,13 +204,13 @@ public:
     /** Write data and punch hole; evict the block on write completion */
     PUNCH_LRU= PUNCH | WRITE_LRU,
     /** Zero out a range of bytes in fil_space_t::io() */
-    PUNCH_RANGE= 128,
+    PUNCH_RANGE= WRITE_SYNC | 128,
   };
 
   constexpr IORequest(Type type= READ_SYNC, buf_page_t *bpage= nullptr) :
     bpage(bpage), type(type) {}
 
-  constexpr IORequest(const IORequest &old, fil_node_t *node) :
+  constexpr IORequest(const IORequest &old, fil_node_t *node= nullptr) :
     bpage(old.bpage), node(node), type(old.type) {}
 
   bool is_read() const { return (type & READ_SYNC) != 0; }

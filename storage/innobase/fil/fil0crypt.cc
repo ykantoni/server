@@ -2245,13 +2245,9 @@ static void fil_crypt_rotation_list_fill()
 		}
 
 		/* Ensure that crypt_data has been initialized. */
-		if (!space->size) {
-			fil_system.read_page0(space);
-			if (!space->size) {
-				/* Page 0 was not loaded.
-				Skip this tablespace. */
-				goto next;
-			}
+		if (!space->get_size()) {
+			/* Page 0 was not loaded. Skip this tablespace. */
+			goto next;
 		}
 
 		/* Skip ENCRYPTION!=DEFAULT tablespaces. */

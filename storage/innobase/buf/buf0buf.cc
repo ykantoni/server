@@ -2768,7 +2768,7 @@ buf_zip_decompress(
 	ulint		size = page_zip_get_size(&block->page.zip);
 	/* The tablespace will not be found if this function is called
 	during IMPORT. */
-	fil_space_t* space= fil_space_acquire_for_io(block->page.id().space());
+	fil_space_t* space= fil_space_t::get_for_io(block->page.id().space());
 	const unsigned key_version = mach_read_from_4(
 		frame + FIL_PAGE_FILE_FLUSH_LSN_OR_KEY_VERSION);
 	fil_space_crypt_t* crypt_data = space ? space->crypt_data : NULL;
@@ -3033,10 +3033,9 @@ buf_page_get_low(
 	case BUF_GET:
 	case BUF_GET_IF_IN_POOL_OR_WATCH:
 	case BUF_GET_POSSIBLY_FREED:
-		fil_space_t* s = fil_space_acquire_for_io(page_id.space());
+		fil_space_t* s = fil_space_get(page_id.space());
 		ut_ad(s);
 		ut_ad(s->zip_size() == zip_size);
-		s->release_for_io();
 	}
 #endif /* UNIV_DEBUG */
 
@@ -3160,8 +3159,7 @@ lookup:
 			asserting. */
 			if (page_id.space() == TRX_SYS_SPACE) {
 			} else if (page_id.space() == SRV_TMP_SPACE_ID) {
-			} else if (fil_space_t* space
-				   = fil_space_acquire_for_io(
+			} else if (fil_space_t* space= fil_space_t::get_for_io(
 					   page_id.space())) {
 				bool set = dict_set_corrupted_by_space(space);
 				space->release_for_io();
@@ -3375,8 +3373,8 @@ re_evict:
 	if (mode != BUF_GET_IF_IN_POOL
 	    && mode != BUF_GET_IF_IN_POOL_OR_WATCH) {
 	} else if (!ibuf_debug) {
-	} else if (fil_space_t* space =
-		   fil_space_acquire_for_io(page_id.space())) {
+	} else if (fil_space_t* space
+		   = fil_space_t::get_for_io(page_id.space())) {
 		/* Try to evict the block from the buffer pool, to use the
 		insert buffer (change buffer) as much as possible. */
 

@@ -7044,11 +7044,13 @@ i_s_tablespaces_encryption_fill_table(
 	}
 
 	mutex_enter(&fil_system.mutex);
+	fil_system.freeze_space_list++;
 
 	for (fil_space_t* space = UT_LIST_GET_FIRST(fil_system.space_list);
 	     space; space = UT_LIST_GET_NEXT(space_list, space)) {
 		if (space->purpose == FIL_TYPE_TABLESPACE
-		    && space->acquire()) {
+		    && !space->is_stopping()) {
+			space->reacquire_for_io();
 			mutex_exit(&fil_system.mutex);
 			if (int err = i_s_dict_fill_tablespaces_encryption(
 				    thd, space, tables->table)) {
@@ -7060,6 +7062,7 @@ i_s_tablespaces_encryption_fill_table(
 		}
 	}
 
+	fil_system.freeze_space_list--;
 	mutex_exit(&fil_system.mutex);
 	DBUG_RETURN(0);
 }

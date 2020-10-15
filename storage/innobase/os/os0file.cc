@@ -4418,12 +4418,11 @@ void fil_node_t::find_metadata(os_file_t file
 }
 
 /** Read the first page of a data file.
-@param[in]	first	whether this is the very first read
 @return	whether the page was found valid */
-bool fil_node_t::read_page0(bool first)
+bool fil_node_t::read_page0()
 {
 	ut_ad(mutex_own(&fil_system.mutex));
-	const ulint psize = space->physical_size();
+	const unsigned psize = space->physical_size();
 #ifndef _WIN32
 	struct stat statbuf;
 	if (fstat(handle, &statbuf)) {
@@ -4435,7 +4434,7 @@ bool fil_node_t::read_page0(bool first)
 	os_offset_t size_bytes = os_file_get_size(handle);
 	ut_a(size_bytes != (os_offset_t) -1);
 #endif
-	const ulint min_size = FIL_IBD_FILE_INITIAL_SIZE * psize;
+	const uint32_t min_size = FIL_IBD_FILE_INITIAL_SIZE * psize;
 
 	if (size_bytes < min_size) {
 		ib::error() << "The size of the file " << name
@@ -4462,7 +4461,7 @@ corrupted:
 	const uint32_t size = fsp_header_get_field(page, FSP_SIZE);
 	const uint32_t free_limit = fsp_header_get_field(page, FSP_FREE_LIMIT);
 	const uint32_t free_len = flst_get_len(FSP_HEADER_OFFSET + FSP_FREE
-					    + page);
+					       + page);
 	if (!fil_space_t::is_valid_flags(flags, space->id)) {
 		ulint cflags = fsp_flags_convert_from_101(flags);
 		if (cflags == ULINT_UNDEFINED) {
@@ -4502,41 +4501,26 @@ invalid:
 		return false;
 	}
 
-	if (first) {
-		ut_ad(space->id != TRX_SYS_SPACE);
 #ifdef UNIV_LINUX
-		find_metadata(handle, &statbuf);
+	find_metadata(handle, &statbuf);
 #else
-		find_metadata();
+	find_metadata();
 #endif
+	/* Truncate the size to a multiple of extent size. */
+	ulint	mask = psize * FSP_EXTENT_SIZE - 1;
 
-		/* Truncate the size to a multiple of extent size. */
-		ulint	mask = psize * FSP_EXTENT_SIZE - 1;
-
-		if (size_bytes <= mask) {
-			/* .ibd files start smaller than an
-			extent size. Do not truncate valid data. */
-		} else {
-			size_bytes &= ~os_offset_t(mask);
-		}
-
-		space->flags = (space->flags & FSP_FLAGS_MEM_MASK) | flags;
-
-		space->punch_hole = space->is_compressed();
-		this->size = uint32_t(size_bytes / psize);
-		space->committed_size = space->size += this->size;
-	} else if (space->id != TRX_SYS_SPACE || space->size_in_header) {
-		/* If this is not the first-time open, do nothing.
-		For the system tablespace, we always get invoked as
-		first=false, so we detect the true first-time-open based
-		on size_in_header and proceed to initialize the data. */
-		return true;
+	if (size_bytes <= mask) {
+		/* .ibd files start smaller than an
+		extent size. Do not truncate valid data. */
 	} else {
-		/* Initialize the size of predefined tablespaces
-		to FSP_SIZE. */
-		space->committed_size = size;
+		size_bytes &= ~os_offset_t(mask);
 	}
 
+	space->flags = (space->flags & FSP_FLAGS_MEM_MASK) | flags;
+
+	space->punch_hole = space->is_compressed();
+	this->size = uint32_t(size_bytes / psize);
+	space->set_sizes(this->size);
 	ut_ad(space->free_limit == 0 || space->free_limit == free_limit);
 	ut_ad(space->free_len == 0 || space->free_len == free_len);
 	space->size_in_header = size;
