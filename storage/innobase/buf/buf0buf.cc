@@ -519,31 +519,6 @@ decrypt_failed:
 	ut_ad(node.space->pending_io());
 	return true;
 }
-
-/**
-@return the smallest oldest_modification lsn for any page.
-@retval 0 if all modified persistent pages have been flushed */
-lsn_t buf_pool_t::get_oldest_modification()
-{
-  mysql_mutex_lock(&flush_list_mutex);
-
-  /* FIXME: Keep temporary tablespace pages in a separate flush
-  list. We would only need to write out temporary pages if the
-  page is about to be evicted from the buffer pool, and the page
-  contents is still needed (the page has not been freed). */
-  const buf_page_t *bpage;
-  for (bpage= UT_LIST_GET_LAST(flush_list);
-       bpage && fsp_is_system_temporary(bpage->id().space());
-       bpage= UT_LIST_GET_PREV(list, bpage))
-    ut_ad(bpage->oldest_modification());
-
-  lsn_t oldest_lsn= bpage ? bpage->oldest_modification() : 0;
-  mysql_mutex_unlock(&flush_list_mutex);
-
-  /* The result may become stale as soon as we released the mutex.
-  On log checkpoint, also log_sys.flush_order_mutex will be needed. */
-  return oldest_lsn;
-}
 #endif /* !UNIV_INNOCHECKSUM */
 
 /** Checks if the page is in crc32 checksum format.

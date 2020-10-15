@@ -111,26 +111,14 @@ log_write_low(
 /*==========*/
 	const byte*	str,		/*!< in: string */
 	ulint		str_len);	/*!< in: string length */
-/************************************************************//**
-Closes the log.
-@return lsn */
-lsn_t
-log_close(void);
-/*===========*/
+/** Close the log at mini-transaction commit.
+@return whether buffer pool flushing is needed */
+bool log_close();
 /** Read the current LSN. */
 #define log_get_lsn() log_sys.get_lsn()
 
 /** Read the durable LSN */
 #define log_get_flush_lsn() log_sys.get_flushed_lsn()
-
-/****************************************************************
-Get log_sys::max_modified_age_async. It is OK to read the value without
-holding log_sys::mutex because it is constant.
-@return max_modified_age_async */
-UNIV_INLINE
-lsn_t
-log_get_max_modified_age_async(void);
-/*================================*/
 
 /** Calculate the recommended highest values for lsn - last_checkpoint_lsn
 and lsn - buf_pool.get_oldest_modification().
@@ -181,8 +169,7 @@ Checks that there is enough free space in the log to start a new query step.
 Flushes the log buffer or makes a new checkpoint if necessary. NOTE: this
 function may only be called if the calling thread owns no synchronization
 objects! */
-void
-log_check_margins(void);
+ATTRIBUTE_COLD void log_check_margins();
 
 /************************************************************//**
 Gets a log block flush bit.
@@ -521,10 +508,6 @@ private:
   std::atomic<lsn_t> lsn;
   /** the first guaranteed-durable log sequence number */
   std::atomic<lsn_t> flushed_to_disk_lsn;
-public:
-  /** first free offset within the log buffer in use */
-  size_t buf_free;
-private:
   /** set when there may be need to flush the log buffer, or
   preflush buffer pool pages, or initiate a log checkpoint.
   This must hold if lsn - last_checkpoint_lsn > max_checkpoint_age. */
@@ -534,6 +517,10 @@ public:
   /** mutex protecting the log */
   MY_ALIGNED(CACHE_LINE_SIZE)
   LogSysMutex mutex;
+  /** first free offset within the log buffer in use */
+  size_t buf_free;
+  /** recommended maximum size of buf, after which the buffer is flushed */
+  size_t max_buf_free;
   /** mutex to serialize access to the flush list when we are putting
   dirty blocks in the list. The idea behind this mutex is to be able
   to release log_sys.mutex during mtr_commit and still ensure that
@@ -545,8 +532,6 @@ public:
   /** log_buffer, writing data to file from this buffer.
   Before flushing write_buf is swapped with flush_buf */
   byte *flush_buf;
-  /** recommended maximum size of buf, after which the buffer is flushed */
-  size_t max_buf_free;
   /** Log file stuff. Protected by mutex. */
   struct file {
     /** format of the redo log: e.g., FORMAT_10_5 */
@@ -721,7 +706,10 @@ public:
   { flushed_to_disk_lsn.store(lsn, std::memory_order_relaxed); }
 
   bool check_flush_or_checkpoint() const
-  { return check_flush_or_checkpoint_.load(std::memory_order_relaxed); }
+  {
+    return UNIV_UNLIKELY
+      (check_flush_or_checkpoint_.load(std::memory_order_relaxed));
+  }
   void set_check_flush_or_checkpoint(bool flag= true)
   { check_flush_or_checkpoint_.store(flag, std::memory_order_relaxed); }
 
@@ -783,11 +771,6 @@ extern log_t	log_sys;
 #ifdef UNIV_DEBUG
 extern bool log_write_lock_own();
 #endif
-
-/** Gets the log capacity. It is OK to read the value without
-holding log_sys.mutex because it is constant.
-@return log capacity */
-inline lsn_t log_get_capacity(void) { return log_sys.log_capacity; }
 
 /** Calculate the offset of a log sequence number.
 @param[in]     lsn     log sequence number

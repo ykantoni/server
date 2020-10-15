@@ -411,12 +411,12 @@ void mtr_t::commit()
   {
     ut_ad(!srv_read_only_mode || m_log_mode == MTR_LOG_NO_REDO);
 
-    lsn_t start_lsn;
+    std::pair<lsn_t,bool> lsns;
 
     if (const ulint len= prepare_write())
-      start_lsn= finish_write(len);
+      lsns= finish_write(len);
     else
-      start_lsn= m_commit_lsn;
+      lsns= { m_commit_lsn, false };
 
     if (m_made_dirty)
       log_flush_order_mutex_enter();
@@ -453,12 +453,15 @@ void mtr_t::commit()
     }
 
     m_memo.for_each_block_in_reverse(CIterate<const ReleaseBlocks>
-                                     (ReleaseBlocks(start_lsn, m_commit_lsn,
+                                     (ReleaseBlocks(lsns.first, m_commit_lsn,
                                                     m_memo)));
     if (m_made_dirty)
       log_flush_order_mutex_exit();
 
     m_memo.for_each_block_in_reverse(CIterate<ReleaseLatches>());
+
+    if (lsns.second)
+      buf_flush_ahead(m_commit_lsn);
   }
   else
     m_memo.for_each_block_in_reverse(CIterate<ReleaseAll>());
@@ -668,10 +671,10 @@ inline ulint mtr_t::prepare_write()
 	return(len);
 }
 
-/** Append the redo log records to the redo log buffer
-@param[in] len	number of bytes to write
-@return start_lsn */
-inline lsn_t mtr_t::finish_write(ulint len)
+/** Append the redo log records to the redo log buffer.
+@param len   number of bytes to write
+@return {start_lsn,flush_ahead_lsn} */
+inline std::pair<lsn_t,bool> mtr_t::finish_write(ulint len)
 {
 	ut_ad(m_log_mode == MTR_LOG_ALL);
 	ut_ad(log_mutex_own());
@@ -688,7 +691,7 @@ inline lsn_t mtr_t::finish_write(ulint len)
 							  &start_lsn);
 
 		if (m_commit_lsn) {
-			return start_lsn;
+			return std::make_pair(start_lsn, false);
 		}
 	}
 
@@ -697,9 +700,10 @@ inline lsn_t mtr_t::finish_write(ulint len)
 
 	mtr_write_log_t	write_log;
 	m_log.for_each_block(write_log);
+	bool flush= log_close();
 
-	m_commit_lsn = log_close();
-	return start_lsn;
+	m_commit_lsn = log_sys.get_lsn();
+	return std::make_pair(start_lsn, flush);
 }
 
 /** Find buffer fix count of the given block acquired by the

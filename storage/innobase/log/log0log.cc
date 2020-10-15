@@ -79,29 +79,21 @@ static time_t	log_last_margine_warning_time;
 #define LOG_BUF_FLUSH_MARGIN	(LOG_BUF_WRITE_MARGIN		\
 				 + (4U << srv_page_size_shift))
 
-/* This parameter controls asynchronous making of a new checkpoint; the value
-should be bigger than LOG_POOL_PREFLUSH_RATIO_SYNC */
-
-#define LOG_POOL_CHECKPOINT_RATIO_ASYNC	32
-
-/* This parameter controls synchronous preflushing of modified buffer pages */
-#define LOG_POOL_PREFLUSH_RATIO_SYNC	16
-
-/* The same ratio for asynchronous preflushing; this value should be less than
-the previous */
-#define LOG_POOL_PREFLUSH_RATIO_ASYNC	8
-
 /** Return the oldest modified LSN in buf_pool.flush_list,
 or the latest LSN if all pages are clean.
+@param lsn  log_sys.get_lsn()
 @return LSN of oldest modification */
-static lsn_t log_buf_pool_get_oldest_modification()
+static lsn_t log_buf_pool_get_oldest_modification(lsn_t lsn)
 {
   ut_ad(log_mutex_own());
+  ut_ad(lsn == log_sys.get_lsn());
   log_flush_order_mutex_enter();
-  lsn_t lsn= buf_pool.get_oldest_modification();
+  mysql_mutex_lock(&buf_pool.flush_list_mutex);
+  const lsn_t oldest_modification= buf_pool.get_oldest_modification(lsn);
+  mysql_mutex_unlock(&buf_pool.flush_list_mutex);
   log_flush_order_mutex_exit();
 
-  return lsn ? lsn : log_sys.get_lsn();
+  return oldest_modification;
 }
 
 /** Extends the log buffer.
@@ -212,25 +204,17 @@ log_margin_checkpoint_age(
 	/* Our margin check should ensure that we never reach this condition.
 	Try to do checkpoint once. We cannot keep waiting here as it might
 	result in hang in case the current mtr has latch on oldest lsn */
+	const lsn_t checkpoint_lsn = log_sys.last_checkpoint_lsn;
 	const lsn_t lsn = log_sys.get_lsn();
 
-	if (lsn - log_sys.last_checkpoint_lsn + margin
-	    > log_sys.log_capacity) {
-		/* The log write of 'len' might overwrite the transaction log
-		after the last checkpoint. Makes checkpoint. */
-
-		const bool flushed_enough = lsn
-			- log_buf_pool_get_oldest_modification() + margin
-			<= log_sys.log_capacity;
-
+	if (UNIV_UNLIKELY(lsn + margin
+			  > checkpoint_lsn + log_sys.log_capacity)) {
 		log_sys.set_check_flush_or_checkpoint();
 		log_mutex_exit();
 
 		DEBUG_SYNC_C("margin_checkpoint_age_rescue");
 
-		if (!flushed_enough) {
-			os_thread_sleep(100000);
-		}
+		buf_flush_wait_flushed(checkpoint_lsn, lsn);
 		log_checkpoint();
 
 		log_mutex_enter();
@@ -348,30 +332,19 @@ part_loop:
 	srv_stats.log_write_requests.inc();
 }
 
-/************************************************************//**
-Closes the log.
-@return lsn */
-lsn_t
-log_close(void)
-/*===========*/
+/** Close the log at mini-transaction commit.
+@return whether buffer pool flushing is needed */
+bool log_close()
 {
 	byte*		log_block;
-	ulint		first_rec_group;
-	lsn_t		oldest_lsn;
-	lsn_t		lsn;
-	lsn_t		checkpoint_age;
 
 	ut_ad(log_mutex_own());
-
-	lsn = log_sys.get_lsn();
 
 	log_block = static_cast<byte*>(
 		ut_align_down(log_sys.buf + log_sys.buf_free,
 			      OS_FILE_LOG_BLOCK_SIZE));
 
-	first_rec_group = log_block_get_first_rec_group(log_block);
-
-	if (first_rec_group == 0) {
+	if (!log_block_get_first_rec_group(log_block)) {
 		/* We initialized a new log block which was not written
 		full by the current mtr: the next mtr log record group
 		will start within this block at the offset data_len */
@@ -384,9 +357,10 @@ log_close(void)
 		log_sys.set_check_flush_or_checkpoint();
 	}
 
-	checkpoint_age = lsn - log_sys.last_checkpoint_lsn;
+	const lsn_t lsn = log_sys.get_lsn();
+	const lsn_t checkpoint_age = lsn - log_sys.last_checkpoint_lsn;
 
-	if (checkpoint_age >= log_sys.log_capacity) {
+	if (UNIV_UNLIKELY(checkpoint_age >= log_sys.log_capacity)) {
 		DBUG_EXECUTE_IF(
 			"print_all_chkp_warnings",
 			log_has_printed_chkp_warning = false;);
@@ -402,23 +376,21 @@ log_close(void)
 				    << ", which exceeds the log capacity "
 				    << log_sys.log_capacity << ".";
 		}
+
+		log_sys.set_check_flush_or_checkpoint();
+		return lsn;
 	}
 
-	if (checkpoint_age <= log_sys.max_modified_age_sync ||
-	    log_sys.check_flush_or_checkpoint()) {
-		goto function_exit;
-	}
+	const lsn_t oldest_lsn = log_buf_pool_get_oldest_modification(lsn);
+	const lsn_t target_lsn = oldest_lsn + log_sys.max_modified_age_sync;
 
-	oldest_lsn = log_buf_pool_get_oldest_modification();
-
-	if (!oldest_lsn
-	    || lsn - oldest_lsn > log_sys.max_modified_age_sync
+	if (lsn > target_lsn
 	    || checkpoint_age > log_sys.max_checkpoint_age_async) {
 		log_sys.set_check_flush_or_checkpoint();
+		return true;
 	}
-function_exit:
 
-	return(lsn);
+	return false;
 }
 
 /** Calculate the recommended highest values for lsn - last_checkpoint_lsn
@@ -465,13 +437,9 @@ log_set_capacity(ulonglong file_size)
 
 	log_sys.log_capacity = smallest_capacity;
 
-	log_sys.max_modified_age_async = margin
-		- margin / LOG_POOL_PREFLUSH_RATIO_ASYNC;
-	log_sys.max_modified_age_sync = margin
-		- margin / LOG_POOL_PREFLUSH_RATIO_SYNC;
-
-	log_sys.max_checkpoint_age_async = margin - margin
-		/ LOG_POOL_CHECKPOINT_RATIO_ASYNC;
+	log_sys.max_modified_age_async = margin - margin / 8;
+	log_sys.max_modified_age_sync = margin - margin / 16;
+	log_sys.max_checkpoint_age_async = margin - margin / 32;
 	log_sys.max_checkpoint_age = margin;
 
 	log_mutex_exit();
@@ -1151,10 +1119,7 @@ log_buffer_flush_to_disk(
 
 Tries to establish a big enough margin of free space in the log buffer, such
 that a new log entry can be catenated without an immediate need for a flush. */
-static
-void
-log_flush_margin(void)
-/*==================*/
+ATTRIBUTE_COLD static void log_flush_margin()
 {
 	lsn_t	lsn	= 0;
 
@@ -1170,58 +1135,6 @@ log_flush_margin(void)
 	if (lsn) {
 		log_write_up_to(lsn, false);
 	}
-}
-
-/** Advances the smallest lsn for which there are unflushed dirty blocks in the
-buffer pool.
-NOTE: this function may only be called if the calling thread owns no
-synchronization objects!
-@param[in]	new_oldest	try to advance oldest_modified_lsn at least to
-this lsn
-@return false if there was a flush batch of the same type running,
-which means that we could not start this flush batch */
-static bool log_preflush_pool_modified_pages(lsn_t new_oldest)
-{
-	bool success;
-
-	if (recv_recovery_is_on()) {
-		/* If the recovery is running, we must first apply all
-		log records to their respective file pages to get the
-		right modify lsn values to these pages: otherwise, there
-		might be pages on disk which are not yet recovered to the
-		current lsn, and even after calling this function, we could
-		not know how up-to-date the disk version of the database is,
-		and we could not make a new checkpoint on the basis of the
-		info on the buffer pool only. */
-		recv_sys.apply(true);
-	}
-
-	if (new_oldest == LSN_MAX
-	    || !buf_page_cleaner_is_active
-	    || srv_is_being_started) {
-
-		ulint n_pages = buf_flush_lists(ULINT_UNDEFINED, new_oldest);
-
-		buf_flush_wait_batch_end_acquiring_mutex(false);
-
-		MONITOR_INC(MONITOR_FLUSH_SYNC_WAITS);
-
-		MONITOR_INC_VALUE_CUMULATIVE(
-			MONITOR_FLUSH_SYNC_TOTAL_PAGE,
-			MONITOR_FLUSH_SYNC_COUNT,
-			MONITOR_FLUSH_SYNC_PAGES,
-			n_pages);
-
-		const lsn_t oldest = buf_pool.get_oldest_modification();
-		success = !oldest || oldest >= new_oldest;
-	} else {
-		/* better to wait for flushed by page cleaner */
-		buf_flush_wait_flushed(new_oldest);
-
-		success = true;
-	}
-
-	return(success);
 }
 
 /** Write checkpoint info to the log header and invoke log_mutex_exit().
@@ -1303,8 +1216,6 @@ log file. Use log_make_checkpoint() to flush also the pool.
 @return true if success, false if a checkpoint write was already running */
 bool log_checkpoint()
 {
-	lsn_t	oldest_lsn;
-
 	ut_ad(!srv_read_only_mode);
 
 	DBUG_EXECUTE_IF("no_checkpoint",
@@ -1333,10 +1244,11 @@ bool log_checkpoint()
 	log_mutex_enter();
 
 	ut_ad(!recv_no_log_write);
-	oldest_lsn = log_buf_pool_get_oldest_modification();
+	const lsn_t end_lsn = log_sys.get_lsn();
+	const lsn_t oldest_lsn = log_buf_pool_get_oldest_modification(end_lsn);
 
 	/* Because log also contains headers and dummy log records,
-	log_buf_pool_get_oldest_modification() will return log_sys.lsn
+	log_buf_pool_get_oldest_modification() will return end_lsn
 	if the buffer pool contains no dirty buffers.
 	We must make sure that the log is flushed up to that lsn.
 	If there are dirty buffers in the buffer pool, then our
@@ -1370,7 +1282,6 @@ bool log_checkpoint()
 	threads will be blocked, and no pages can be added to the
 	flush lists. */
 	lsn_t		flush_lsn	= oldest_lsn;
-	const lsn_t	end_lsn		= log_sys.get_lsn();
 	const bool	do_write
 		= srv_shutdown_state <= SRV_SHUTDOWN_INITIATED
 		|| flush_lsn != end_lsn;
@@ -1412,10 +1323,7 @@ bool log_checkpoint()
 void log_make_checkpoint()
 {
 	/* Preflush pages synchronously */
-
-	while (!log_preflush_pool_modified_pages(LSN_MAX)) {
-		/* Flush as much as we can */
-	}
+	buf_flush_wait_flushed(LSN_MAX, LSN_MAX);
 
 	while (!log_checkpoint()) {
 		/* Force a checkpoint */
@@ -1423,67 +1331,42 @@ void log_make_checkpoint()
 }
 
 /****************************************************************//**
-Tries to establish a big enough margin of free space in the log groups, such
+Tries to establish a big enough margin of free space in the log, such
 that a new log entry can be catenated without an immediate need for a
 checkpoint. NOTE: this function may only be called if the calling thread
 owns no synchronization objects! */
-static
-void
-log_checkpoint_margin(void)
-/*=======================*/
+ATTRIBUTE_COLD static void log_checkpoint_margin()
 {
-	ib_uint64_t	advance;
-	bool		success;
-loop:
-	advance = 0;
+  if (!log_sys.check_flush_or_checkpoint())
+    return;
 
-	log_mutex_enter();
-	ut_ad(!recv_no_log_write);
+  log_mutex_enter();
+  ut_ad(!recv_no_log_write);
+  ut_ad(log_sys.max_checkpoint_age >= log_sys.max_checkpoint_age_async);
 
-	if (!log_sys.check_flush_or_checkpoint()) {
-		log_mutex_exit();
-		return;
-	}
+  if (!log_sys.check_flush_or_checkpoint())
+  {
+    log_mutex_exit();
+    return;
+  }
 
-	const lsn_t oldest_lsn = log_buf_pool_get_oldest_modification();
-	const lsn_t lsn = log_sys.get_lsn();
-	const lsn_t age = lsn - oldest_lsn;
+  const lsn_t lsn= log_sys.get_lsn();
+  const lsn_t async_checkpoint_lsn= log_sys.last_checkpoint_lsn +
+    log_sys.max_checkpoint_age_async;
+  const lsn_t sync_checkpoint_lsn= log_sys.last_checkpoint_lsn +
+    log_sys.max_checkpoint_age;
+  if (lsn <= sync_checkpoint_lsn)
+    log_sys.set_check_flush_or_checkpoint(false);
+  log_mutex_exit();
 
-	if (age > log_sys.max_modified_age_sync) {
-
-		/* A flush is urgent: we have to do a synchronous preflush */
-		advance = age - log_sys.max_modified_age_sync;
-	}
-
-	const lsn_t checkpoint_age = lsn - log_sys.last_checkpoint_lsn;
-
-	ut_ad(log_sys.max_checkpoint_age >= log_sys.max_checkpoint_age_async);
-	const bool do_checkpoint
-		= checkpoint_age > log_sys.max_checkpoint_age_async;
-
-	if (checkpoint_age <= log_sys.max_checkpoint_age) {
-		log_sys.set_check_flush_or_checkpoint(false);
-	}
-
-	log_mutex_exit();
-
-	if (advance) {
-		lsn_t	new_oldest = oldest_lsn + advance;
-
-		success = log_preflush_pool_modified_pages(new_oldest);
-
-		/* If the flush succeeded, this thread has done its part
-		and can proceed. If it did not succeed, there was another
-		thread doing a flush at the same time. */
-		if (!success) {
-			log_sys.set_check_flush_or_checkpoint();
-			goto loop;
-		}
-	}
-
-	if (do_checkpoint) {
-		log_checkpoint();
-	}
+  if (lsn > async_checkpoint_lsn)
+  {
+    if (lsn > sync_checkpoint_lsn)
+      buf_flush_wait_flushed(sync_checkpoint_lsn, lsn);
+    else
+      buf_flush_ahead(async_checkpoint_lsn);
+    log_checkpoint();
+  }
 }
 
 /**
@@ -1491,7 +1374,7 @@ Checks that there is enough free space in the log to start a new query step.
 Flushes the log buffer or makes a new checkpoint if necessary. NOTE: this
 function may only be called if the calling thread owns no synchronization
 objects! */
-void log_check_margins()
+ATTRIBUTE_COLD void log_check_margins()
 {
   do
   {
@@ -1777,14 +1660,16 @@ log_print(
 
 	log_mutex_enter();
 
+	const lsn_t lsn= log_sys.get_lsn();
+
 	fprintf(file,
 		"Log sequence number " LSN_PF "\n"
 		"Log flushed up to   " LSN_PF "\n"
 		"Pages flushed up to " LSN_PF "\n"
 		"Last checkpoint at  " LSN_PF "\n",
-		log_sys.get_lsn(),
+		lsn,
 		log_sys.get_flushed_lsn(),
-		log_buf_pool_get_oldest_modification(),
+		log_buf_pool_get_oldest_modification(lsn),
 		log_sys.last_checkpoint_lsn);
 
 	current_time = time(NULL);

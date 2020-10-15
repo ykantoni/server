@@ -1956,7 +1956,9 @@ srv_mon_process_existing_counter(
 		break;
 
 	case MONITOR_OVLD_BUF_OLDEST_LSN:
-		value = (mon_type_t) buf_pool.get_oldest_modification();
+		mysql_mutex_lock(&buf_pool.flush_list_mutex);
+		value = (mon_type_t) buf_pool.get_oldest_modification(0);
+		mysql_mutex_unlock(&buf_pool.flush_list_mutex);
 		break;
 
 	case MONITOR_OVLD_LSN_CHECKPOINT:
