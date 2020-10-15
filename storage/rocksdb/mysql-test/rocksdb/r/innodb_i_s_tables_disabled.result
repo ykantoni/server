@@ -176,7 +176,6 @@ log_lsn_current	recovery	0	NULL	NULL	NULL	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	0
 log_lsn_checkpoint_age	recovery	0	NULL	NULL	NULL	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	0	value	Current LSN value minus LSN at last checkpoint
 log_lsn_buf_pool_oldest	recovery	0	NULL	NULL	NULL	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	0	value	The oldest modified block LSN in the buffer pool
 log_max_modified_age_async	recovery	0	NULL	NULL	NULL	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	0	value	Maximum LSN difference; when exceeded, start asynchronous preflush
-log_max_modified_age_sync	recovery	0	NULL	NULL	NULL	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	0	value	Maximum LSN difference; when exceeded, start synchronous preflush
 log_pending_log_flushes	recovery	0	NULL	NULL	NULL	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	0	value	Pending log flushes
 log_pending_checkpoint_writes	recovery	0	NULL	NULL	NULL	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	0	value	Pending checkpoints
 log_num_log_io	recovery	0	NULL	NULL	NULL	0	NULL	NULL	NULL	NULL	NULL	NULL	NULL	0	value	Number of log I/Os

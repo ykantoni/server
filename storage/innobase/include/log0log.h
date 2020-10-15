@@ -649,12 +649,6 @@ public:
 					buf_pool.get_oldest_modification()
 					is exceeded, we start an
 					asynchronous preflush of pool pages */
-	lsn_t		max_modified_age_sync;
-					/*!< when this recommended
-					value for lsn -
-					buf_pool.get_oldest_modification()
-					is exceeded, we start a
-					synchronous preflush of pool pages */
 	lsn_t		max_checkpoint_age_async;
 					/*!< when this checkpoint age
 					is exceeded we start an

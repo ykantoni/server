@@ -381,11 +381,7 @@ bool log_close()
 		return lsn;
 	}
 
-	const lsn_t oldest_lsn = log_buf_pool_get_oldest_modification(lsn);
-	const lsn_t target_lsn = oldest_lsn + log_sys.max_modified_age_sync;
-
-	if (lsn > target_lsn
-	    || checkpoint_age > log_sys.max_checkpoint_age_async) {
+	if (checkpoint_age > log_sys.max_checkpoint_age_async) {
 		log_sys.set_check_flush_or_checkpoint();
 		return true;
 	}
@@ -438,7 +434,6 @@ log_set_capacity(ulonglong file_size)
 	log_sys.log_capacity = smallest_capacity;
 
 	log_sys.max_modified_age_async = margin - margin / 8;
-	log_sys.max_modified_age_sync = margin - margin / 16;
 	log_sys.max_checkpoint_age_async = margin - margin / 32;
 	log_sys.max_checkpoint_age = margin;
 
@@ -486,7 +481,6 @@ void log_t::create()
   n_log_ios_old= 0;
   log_capacity= 0;
   max_modified_age_async= 0;
-  max_modified_age_sync= 0;
   max_checkpoint_age_async= 0;
   max_checkpoint_age= 0;
   next_checkpoint_no= 0;

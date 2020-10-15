@@ -868,12 +868,6 @@ static monitor_info_t	innodb_counter_info[] =
 	 MONITOR_EXISTING | MONITOR_DISPLAY_CURRENT),
 	 MONITOR_DEFAULT_START, MONITOR_OVLD_MAX_AGE_ASYNC},
 
-	{"log_max_modified_age_sync", "recovery",
-	 "Maximum LSN difference; when exceeded, start synchronous preflush",
-	 static_cast<monitor_type_t>(
-	 MONITOR_EXISTING | MONITOR_DISPLAY_CURRENT),
-	 MONITOR_DEFAULT_START, MONITOR_OVLD_MAX_AGE_SYNC},
-
 	{"log_pending_log_flushes", "recovery", "Pending log flushes",
 	 static_cast<monitor_type_t>(
 	 MONITOR_EXISTING | MONITOR_DISPLAY_CURRENT),
@@ -1967,10 +1961,6 @@ srv_mon_process_existing_counter(
 
 	case MONITOR_OVLD_MAX_AGE_ASYNC:
 		value = log_sys.max_modified_age_async;
-		break;
-
-	case MONITOR_OVLD_MAX_AGE_SYNC:
-		value = log_sys.max_modified_age_sync;
 		break;
 
 #ifdef BTR_CUR_HASH_ADAPT
