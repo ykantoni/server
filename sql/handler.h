@@ -630,6 +630,9 @@ given at all. */
 /* Tell binlog_show_create_table to print all engine options */
 #define HA_CREATE_PRINT_ALL_OPTIONS       (1UL << 26)
 
+/* Mark that this table uses the MYSQL_JSON datatype. */
+#define HA_CREATE_USED_MYSQL_JSON         (1UL << 27)
+
 typedef ulonglong alter_table_operations;
 typedef bool Log_func(THD*, TABLE*, bool, const uchar*, const uchar*);
 
