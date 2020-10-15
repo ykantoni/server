@@ -621,19 +621,11 @@ buf_load()
 	ulint		last_check_time = 0;
 	ulint		last_activity_cnt = 0;
 
-	/* Avoid calling the expensive fil_space_acquire_silent() for each
+	/* Avoid calling the expensive fil_space_t::get() for each
 	page within the same tablespace. dump[] is sorted by (space, page),
 	so all pages from a given tablespace are consecutive. */
 	ulint		cur_space_id = dump[0].space();
-	fil_space_t*	space = fil_space_acquire_silent(cur_space_id);
-	if (space) {
-		bool ok = space->acquire_for_io();
-		space->release();
-		if (!ok) {
-			space = nullptr;
-		}
-	}
-
+	fil_space_t*	space = fil_space_t::get(cur_space_id);
 	ulint		zip_size = space ? space->zip_size() : 0;
 
 	PSI_stage_progress*	pfs_stage_progress __attribute__((unused))
@@ -653,21 +645,13 @@ buf_load()
 
 		if (this_space_id != cur_space_id) {
 			if (space) {
-				space->release_for_io();
+				space->release();
 			}
 
 			cur_space_id = this_space_id;
-			space = fil_space_acquire_silent(cur_space_id);
+			space = fil_space_t::get(cur_space_id);
 
 			if (!space) {
-				continue;
-			}
-
-			bool ok = space->acquire_for_io();
-			space->release();
-
-			if (!ok) {
-				space = nullptr;
 				continue;
 			}
 
@@ -683,12 +667,18 @@ buf_load()
 			continue;
 		}
 
-		space->reacquire_for_io();
+		if (space->is_stopping()) {
+			space->release();
+			space = nullptr;
+			continue;
+		}
+
+		space->reacquire();
 		buf_read_page_background(space, dump[i], zip_size, true);
 
 		if (buf_load_abort_flag) {
 			if (space) {
-				space->release_for_io();
+				space->release();
 			}
 			buf_load_abort_flag = false;
 			ut_free(dump);
@@ -716,7 +706,7 @@ buf_load()
 	}
 
 	if (space) {
-		space->release_for_io();
+		space->release();
 	}
 
 	ut_free(dump);
