@@ -931,8 +931,8 @@ static bool buf_flush_page(buf_page_t *bpage, bool lru, fil_space_t *space)
       buf_pool.n_flush_LRU++;
     else
       buf_pool.n_flush_list++;
-    fil_io(IORequest(type, bpage), space,
-           bpage->physical_offset(), bpage->physical_size(), frame, bpage);
+    space->io(IORequest(type, bpage),
+              bpage->physical_offset(), bpage->physical_size(), frame, bpage);
   }
 
   /* Increment the I/O operation count used for selecting LRU policy. */
@@ -1054,18 +1054,18 @@ static void buf_flush_freed_pages(fil_space_t *space)
 
     if (punch_hole)
     {
-      fil_io_t fio= fil_io(IORequest(IORequest::PUNCH_RANGE), space,
-                           os_offset_t{range.first} * physical_size,
-                           (range.last - range.first + 1) * physical_size,
-                           nullptr, nullptr);
+      fil_io_t fio= space->io(IORequest(IORequest::PUNCH_RANGE),
+                              os_offset_t{range.first} * physical_size,
+                              (range.last - range.first + 1) * physical_size,
+                              nullptr);
       if (fio.node)
-        fio.node->space->release_for_io();
+        space->release_for_io();
     }
     else if (srv_immediate_scrub_data_uncompressed)
       for (os_offset_t i= range.first; i <= range.last; i++)
-        fil_io(IORequest(IORequest::WRITE_ASYNC), space,
-               i * physical_size, physical_size,
-               const_cast<byte*>(field_ref_zero), nullptr);
+        space->io(IORequest(IORequest::WRITE_ASYNC),
+                  i * physical_size, physical_size,
+                  const_cast<byte*>(field_ref_zero));
     buf_pool.stat.n_pages_written+= (range.last - range.first + 1);
   }
 }

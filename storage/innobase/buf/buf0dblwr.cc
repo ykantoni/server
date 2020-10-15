@@ -390,9 +390,9 @@ next_page:
     memset(read_buf, 0x0, physical_size);
 
     /* Read in the actual page from the file */
-    fil_io_t fio= fil_io(IORequest(IORequest::DBLWR_RECOVER),
-                         space, os_offset_t{page_no} * physical_size,
-                         physical_size, read_buf, nullptr);
+    fil_io_t fio= space->io(IORequest(IORequest::DBLWR_RECOVER),
+                            os_offset_t{page_no} * physical_size,
+                            physical_size, read_buf);
 
     if (UNIV_UNLIKELY(fio.err != DB_SUCCESS))
        ib::warn() << "Double write buffer recovery: " << page_id
@@ -400,7 +400,7 @@ next_page:
                   << "') read failed with error: " << fio.err;
 
     if (fio.node)
-      fio.node->space->release_for_io();
+      space->release_for_io();
 
     if (buf_is_zeroes(span<const byte>(read_buf, physical_size)))
     {
@@ -422,9 +422,9 @@ next_page:
 
     /* Write the good page from the doublewrite buffer to the intended
     position. */
-    fio= fil_io(IORequestWrite, space,
-                os_offset_t{page_id.page_no()} * physical_size,
-                physical_size, page, nullptr);
+    fio= space->io(IORequestWrite,
+                   os_offset_t{page_id.page_no()} * physical_size,
+                   physical_size, page);
 
     if (fio.node)
     {
@@ -588,20 +588,22 @@ bool buf_dblwr_t::flush_buffered_writes(const ulint size)
   }
 #endif /* UNIV_DEBUG */
   /* Write out the first block of the doublewrite buffer */
-  fil_io_t fio= fil_io(IORequestWrite, fil_system.sys_space,
-                       os_offset_t{block1.page_no()} << srv_page_size_shift,
-                       std::min(size, old_first_free) << srv_page_size_shift,
-                       write_buf, nullptr);
-  fio.node->space->release_for_io();
+  fil_system.sys_space->io(IORequestWrite,
+                           os_offset_t{block1.page_no()} <<
+                           srv_page_size_shift,
+                           std::min(size, old_first_free) <<
+                           srv_page_size_shift, write_buf);
+  fil_system.sys_space->release_for_io();
 
   if (old_first_free > size)
   {
     /* Write out the second block of the doublewrite buffer. */
-    fio= fil_io(IORequestWrite, fil_system.sys_space,
-                os_offset_t{block2.page_no()} << srv_page_size_shift,
-                (old_first_free - size) << srv_page_size_shift,
-                write_buf + (size << srv_page_size_shift), nullptr);
-    fio.node->space->release_for_io();
+    fil_system.sys_space->io(IORequestWrite,
+                             os_offset_t{block2.page_no()} <<
+                             srv_page_size_shift,
+                             (old_first_free - size) << srv_page_size_shift,
+                             write_buf + (size << srv_page_size_shift));
+    fil_system.sys_space->release_for_io();
   }
 
   /* increment the doublewrite flushed pages counter */
@@ -609,7 +611,7 @@ bool buf_dblwr_t::flush_buffered_writes(const ulint size)
   srv_stats.dblwr_writes.inc();
 
   /* Now flush the doublewrite buffer data to disk */
-  fil_flush(TRX_SYS_SPACE);
+  fil_system.sys_space->flush();
 
   /* We know that the writes have been flushed to disk now
   and in recovery we will find them in the doublewrite buffer
@@ -650,9 +652,11 @@ bool buf_dblwr_t::flush_buffered_writes(const ulint size)
       ut_d(buf_dblwr_check_page_lsn(*bpage, static_cast<const byte*>(frame)));
     }
 
-    fil_io(IORequest(e.lru ? IORequest::WRITE_LRU : IORequest::WRITE_ASYNC,
-                     bpage),
-           e.space, bpage->physical_offset(), e_size, frame, bpage);
+    e.space->io(IORequest(e.lru
+                          ? IORequest::WRITE_LRU
+                          : IORequest::WRITE_ASYNC,
+                          bpage), bpage->physical_offset(), e_size, frame,
+                bpage);
     e.space->release_for_io();
   }
 

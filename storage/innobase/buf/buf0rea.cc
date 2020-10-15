@@ -340,17 +340,17 @@ buf_read_page_low(
 
 	const ulint len = zip_size ? zip_size : srv_page_size;
 
-	fil_io_t fio = fil_io(
-		IORequest(sync ? IORequest::READ_SYNC : IORequest::READ_ASYNC),
-		space, page_id.page_no() * len, len, dst, bpage);
-
+	auto fio = space->io(IORequest(sync
+				       ? IORequest::READ_SYNC
+				       : IORequest::READ_ASYNC),
+			     page_id.page_no() * len, len, dst, bpage);
 	*err= fio.err;
 
 	if (UNIV_UNLIKELY(fio.err != DB_SUCCESS)) {
 		if (!sync || fio.err == DB_TABLESPACE_DELETED) {
 			buf_pool.corrupted_evict(bpage);
 			if (sync && fio.node) {
-				fio.node->space->release_for_io();
+				space->release_for_io();
 			}
 			return(0);
 		}
@@ -361,9 +361,9 @@ buf_read_page_low(
 	if (sync) {
 		thd_wait_end(NULL);
 
-		/* The i/o was already completed in fil_io() */
+		/* The i/o was already completed in space->io() */
 		*err = buf_page_read_complete(bpage, *fio.node);
-		fio.node->space->release_for_io();
+		space->release_for_io();
 
 		if (*err != DB_SUCCESS) {
 			return(0);

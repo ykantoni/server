@@ -203,7 +203,7 @@ public:
     PUNCH= WRITE_ASYNC | 64,
     /** Write data and punch hole; evict the block on write completion */
     PUNCH_LRU= PUNCH | WRITE_LRU,
-    /** Zero out a range of bytes in fil_io() */
+    /** Zero out a range of bytes in fil_space_t::io() */
     PUNCH_RANGE= 128,
   };
 

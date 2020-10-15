@@ -313,6 +313,14 @@ new_range:
 
 /** Tablespace or log data space */
 #ifndef UNIV_INNOCHECKSUM
+struct fil_io_t
+{
+  /** error code */
+  dberr_t err;
+  /** file; node->space->release_for_io() must follow fil_io(sync=true) call */
+  fil_node_t *node;
+};
+
 struct fil_space_t : ilist_node<unflushed_spaces_tag_t>,
                      ilist_node<rotation_list_tag_t>
 #else
@@ -866,8 +874,19 @@ public:
 
   /** @return the size in pages (0 if unreadable) */
   inline uint32_t get_size();
-#endif /*!UNIV_INNOCHECKSUM */
 
+  /** Read or write data.
+  @param type     I/O context
+  @param offset   offset in bytes
+  @param len      number of bytes
+  @param buf      the data to be read or written
+  @param bpage    buffer block (for type.is_async() completion callback)
+  @return status and file descriptor */
+  fil_io_t io(const IORequest &type, os_offset_t offset, size_t len,
+              void *buf, buf_page_t *bpage= nullptr);
+  /** Flush pending writes from the file system cache to the file */
+  void flush();
+#endif /*!UNIV_INNOCHECKSUM */
 };
 
 #ifndef UNIV_INNOCHECKSUM
@@ -1367,7 +1386,8 @@ inline void fil_node_t::complete_io(bool write)
     else if (!space->is_stopping())
     {
       needs_flush= true;
-      if (!space->is_in_unflushed_spaces)
+      if (!space->is_in_unflushed_spaces &&
+          space->purpose != FIL_TYPE_TEMPORARY)
       {
         space->is_in_unflushed_spaces= true;
         fil_system.unflushed_spaces.push_front(*space);
@@ -1694,62 +1714,6 @@ fil_space_for_table_exists_in_mem(
 @param[in]	size	desired size in pages
 @return whether the tablespace is at least as big as requested */
 bool fil_space_extend(fil_space_t *space, uint32_t size);
-
-struct fil_io_t
-{
-  /** error code */
-  dberr_t err;
-  /** file; node->space->release_for_io() must follow fil_io(sync=true) call */
-  fil_node_t *node;
-};
-
-/** Reads or writes data. This operation could be asynchronous (aio).
-
-@param[in]	type		IO context
-@param[in,out]	space		tablespace
-@param[in]	byte_offset	offset in bytes; in aio this
-				must be divisible by the OS block size
-@param[in]	len		how many bytes to read or write; this must
-				not cross a file boundary; in aio this must
-				be a block size multiple
-@param[in,out]	buf		buffer where to store read data or from where
-				to write; in aio this must be appropriately
-				aligned
-@param[in,out]	bpage		buffer pool page descriptor
-				(for type.is_async() completion callback)
-@return status and file descriptor */
-fil_io_t
-fil_io(
-	const IORequest&	type,
-	fil_space_t*		space,
-	os_offset_t		byte_offset,
-	ulint			len,
-	void*			buf,
-	buf_page_t*		bpage)
-	MY_ATTRIBUTE((nonnull(2)));
-
-/**********************************************************************//**
-Waits for an aio operation to complete. This function is used to write the
-handler for completed requests. The aio array of pending requests is divided
-into segments (see os0file.cc for more info). The thread specifies which
-segment it wants to wait for. */
-void
-fil_aio_wait(
-/*=========*/
-	ulint	segment);	/*!< in: the number of the segment in the aio
-				array to wait for */
-/**********************************************************************//**
-Flushes to disk possible writes cached by the OS. If the space does not exist
-or is being dropped, does not do anything. */
-void
-fil_flush(
-/*======*/
-	ulint	space_id);	/*!< in: file space id (this can be a group of
-				log files or a tablespace of the database) */
-/** Flush a tablespace.
-@param[in,out]	space	tablespace to flush */
-void
-fil_flush(fil_space_t* space);
 
 /** Flush to disk the writes in file spaces of the given type
 possibly cached by the OS. */

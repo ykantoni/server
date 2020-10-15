@@ -3106,7 +3106,7 @@ lookup:
 		}
 
 		/* The call path is buf_read_page() ->
-		buf_read_page_low() (fil_io()) ->
+		buf_read_page_low() (fil_space_t::io()) ->
 		buf_page_read_complete() ->
 		buf_decrypt_after_read(). Here fil_space_t* is used
 		and we decrypt -> buf_page_check_corrupt() where page

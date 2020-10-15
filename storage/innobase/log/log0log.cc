@@ -1229,15 +1229,9 @@ bool log_checkpoint()
 
 	switch (srv_file_flush_method) {
 	case SRV_NOSYNC:
-		break;
-	case SRV_O_DSYNC:
-	case SRV_FSYNC:
-	case SRV_LITTLESYNC:
-	case SRV_O_DIRECT:
 	case SRV_O_DIRECT_NO_FSYNC:
-#ifdef _WIN32
-	case SRV_ALL_O_DIRECT_FSYNC:
-#endif
+		break;
+	default:
 		fil_flush_file_spaces();
 	}
 
