@@ -433,8 +433,13 @@ log_set_capacity(ulonglong file_size)
 
 	log_sys.log_capacity = smallest_capacity;
 
-	log_sys.max_modified_age_async = margin - margin / 8;
-	log_sys.max_checkpoint_age_async = margin - margin / 32;
+	/* The soft limits used to be 7/8*margin and 31/32*margin.
+	A more efficient soft limit for log_checkpoint_margin() turned
+	out to be 7/8*margin. To keep the adaptive page flushing roughly
+	10% ahead of log_checkpoint_margin(), we will use a revised
+	ratio of 25/32*margin. */
+	log_sys.max_modified_age_async = margin - margin / 4 + margin / 32;
+	log_sys.max_checkpoint_age_async = margin - margin / 8;
 	log_sys.max_checkpoint_age = margin;
 
 	log_mutex_exit();
