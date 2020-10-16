@@ -2718,3 +2718,172 @@ Warning	1931	Query execution was interrupted. The query examined at least 3020 r
 SET join_cache_level= @save_join_cache_level;
 DROP TABLE t1,t2,t3,t4;
 # End of 10.2 tests
+#
+# MDEV-21265: IN predicate conversion to IN subquery should be allowed for a broader set of datatype comparison
+#
+CREATE TABLE t1 ( col1 varchar (32) collate utf8_general_ci);
+CREATE TABLE t2 ( col1 varchar (32) collate utf8mb4_general_ci, key(col1));
+INSERT INTO t1 select seq from seq_1_to_100;
+INSERT INTO t1 values ('?');
+INSERT INTO t2 values (_utf8mb4 X'F09F9883'), (1);
+#
+# Compatible collations in non-semi join query
+#
+EXPLAIN SELECT HEX(col1), col1 IN (SELECT col1 FROM t1) FROM t2;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	PRIMARY	t2	index	NULL	col1	131	NULL	2	Using index
+2	MATERIALIZED	t1	ALL	NULL	NULL	NULL	NULL	101	
+EXPLAIN FORMAT=JSON SELECT HEX(col1), col1 IN (SELECT col1 FROM t1) FROM t2;
+EXPLAIN
+{
+  "query_block": {
+    "select_id": 1,
+    "table": {
+      "table_name": "t2",
+      "access_type": "index",
+      "key": "col1",
+      "key_length": "131",
+      "used_key_parts": ["col1"],
+      "rows": 2,
+      "filtered": 100,
+      "using_index": true
+    },
+    "subqueries": [
+      {
+        "query_block": {
+          "select_id": 2,
+          "table": {
+            "table_name": "t1",
+            "access_type": "ALL",
+            "rows": 101,
+            "filtered": 100
+          }
+        }
+      }
+    ]
+  }
+}
+SELECT HEX(col1), col1 IN (SELECT col1 FROM t1) FROM t2;
+HEX(col1)	col1 IN (SELECT col1 FROM t1)
+31	1
+F09F9883	0
+#
+# Compatible collations in semi-join materialzation lookup strategy
+#
+EXPLAIN SELECT  HEX(t2.col1) FROM t2 WHERE col1 in (select col1 from t1);
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	PRIMARY	t2	index	col1	col1	131	NULL	2	Using index
+1	PRIMARY	<subquery2>	eq_ref	distinct_key	distinct_key	99	func	1	Using where
+2	MATERIALIZED	t1	ALL	NULL	NULL	NULL	NULL	101	
+EXPLAIN FORMAT=JSON SELECT  HEX(t2.col1) FROM t2 WHERE col1 in (select col1 from t1);
+EXPLAIN
+{
+  "query_block": {
+    "select_id": 1,
+    "table": {
+      "table_name": "t2",
+      "access_type": "index",
+      "possible_keys": ["col1"],
+      "key": "col1",
+      "key_length": "131",
+      "used_key_parts": ["col1"],
+      "rows": 2,
+      "filtered": 100,
+      "using_index": true
+    },
+    "table": {
+      "table_name": "<subquery2>",
+      "access_type": "eq_ref",
+      "possible_keys": ["distinct_key"],
+      "key": "distinct_key",
+      "key_length": "99",
+      "used_key_parts": ["col1"],
+      "ref": ["func"],
+      "rows": 1,
+      "filtered": 100,
+      "attached_condition": "t2.col1 = convert(t1.col1 using utf8mb4)",
+      "materialized": {
+        "unique": 1,
+        "query_block": {
+          "select_id": 2,
+          "table": {
+            "table_name": "t1",
+            "access_type": "ALL",
+            "rows": 101,
+            "filtered": 100
+          }
+        }
+      }
+    }
+  }
+}
+SELECT  HEX(t2.col1) FROM t2 WHERE col1 in (select col1 from t1);
+HEX(t2.col1)
+31
+DROP TABLE t1,t2;
+create table t1 ( col1 varchar (32) collate utf8_general_ci);
+create table t2 ( col1 varchar (32) collate utf8mb4_general_ci, key(col1));
+insert into t1 select seq from seq_1_to_5;
+insert into t1 values ('?');
+insert into t2 select seq from seq_1_to_100;
+insert into t2 values (_utf8mb4 X'F09F9883');
+#
+# Compatible collations in semi-join materialzation scan strategy
+#
+EXPLAIN SELECT  HEX(t2.col1) FROM t2 WHERE col1 in (select col1 from t1);
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	PRIMARY	<subquery2>	ALL	distinct_key	NULL	NULL	NULL	6	
+1	PRIMARY	t2	index	col1	col1	131	NULL	101	Using where; Using index; Using join buffer (flat, BNL join)
+2	MATERIALIZED	t1	ALL	NULL	NULL	NULL	NULL	6	
+EXPLAIN FORMAT=JSON SELECT  HEX(t2.col1) FROM t2 WHERE col1 in (select col1 from t1);
+EXPLAIN
+{
+  "query_block": {
+    "select_id": 1,
+    "table": {
+      "table_name": "<subquery2>",
+      "access_type": "ALL",
+      "possible_keys": ["distinct_key"],
+      "rows": 6,
+      "filtered": 100,
+      "materialized": {
+        "unique": 1,
+        "query_block": {
+          "select_id": 2,
+          "table": {
+            "table_name": "t1",
+            "access_type": "ALL",
+            "rows": 6,
+            "filtered": 100
+          }
+        }
+      }
+    },
+    "block-nl-join": {
+      "table": {
+        "table_name": "t2",
+        "access_type": "index",
+        "possible_keys": ["col1"],
+        "key": "col1",
+        "key_length": "131",
+        "used_key_parts": ["col1"],
+        "rows": 101,
+        "filtered": 0.9901,
+        "using_index": true
+      },
+      "buffer_type": "flat",
+      "buffer_size": "256Kb",
+      "join_type": "BNL",
+      "attached_condition": "t2.col1 = convert(t1.col1 using utf8mb4)"
+    }
+  }
+}
+SELECT  HEX(t2.col1) FROM t2 WHERE col1 in (select col1 from t1);
+HEX(t2.col1)
+31
+32
+33
+34
+35
+DROP TABLE t1,t2;
+# End of 10.3 tests

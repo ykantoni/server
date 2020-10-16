@@ -2238,3 +2238,50 @@ SET join_cache_level= @save_join_cache_level;
 DROP TABLE t1,t2,t3,t4;
 
 --echo # End of 10.2 tests
+
+--echo #
+--echo # MDEV-21265: IN predicate conversion to IN subquery should be allowed for a broader set of datatype comparison
+--echo #
+
+CREATE TABLE t1 ( col1 varchar (32) collate utf8_general_ci);
+CREATE TABLE t2 ( col1 varchar (32) collate utf8mb4_general_ci, key(col1));
+INSERT INTO t1 select seq from seq_1_to_100;
+INSERT INTO t1 values ('?');
+INSERT INTO t2 values (_utf8mb4 X'F09F9883'), (1);
+
+--echo #
+--echo # Compatible collations in non-semi join query
+--echo #
+
+EXPLAIN SELECT HEX(col1), col1 IN (SELECT col1 FROM t1) FROM t2;
+EXPLAIN FORMAT=JSON SELECT HEX(col1), col1 IN (SELECT col1 FROM t1) FROM t2;
+SELECT HEX(col1), col1 IN (SELECT col1 FROM t1) FROM t2;
+
+--echo #
+--echo # Compatible collations in semi-join materialzation lookup strategy
+--echo #
+
+EXPLAIN SELECT  HEX(t2.col1) FROM t2 WHERE col1 in (select col1 from t1);
+EXPLAIN FORMAT=JSON SELECT  HEX(t2.col1) FROM t2 WHERE col1 in (select col1 from t1);
+SELECT  HEX(t2.col1) FROM t2 WHERE col1 in (select col1 from t1);
+
+DROP TABLE t1,t2;
+
+create table t1 ( col1 varchar (32) collate utf8_general_ci);
+create table t2 ( col1 varchar (32) collate utf8mb4_general_ci, key(col1));
+insert into t1 select seq from seq_1_to_5;
+insert into t1 values ('?');
+insert into t2 select seq from seq_1_to_100;
+insert into t2 values (_utf8mb4 X'F09F9883');
+
+--echo #
+--echo # Compatible collations in semi-join materialzation scan strategy
+--echo #
+
+EXPLAIN SELECT  HEX(t2.col1) FROM t2 WHERE col1 in (select col1 from t1);
+EXPLAIN FORMAT=JSON SELECT  HEX(t2.col1) FROM t2 WHERE col1 in (select col1 from t1);
+SELECT  HEX(t2.col1) FROM t2 WHERE col1 in (select col1 from t1);
+
+DROP TABLE t1,t2;
+
+--echo # End of 10.3 tests
