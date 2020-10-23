@@ -32,7 +32,6 @@ SET(MY_WARNING_FLAGS
   -Wno-unused-private-field
   -Woverloaded-virtual
   -Wnon-virtual-dtor
-  -Wvla
   -Wwrite-strings
   )
 
