@@ -15,8 +15,8 @@
 #        also written to binary log.
 #    3 - Kill and restart the server with --tc-heuristic-recover=BINLOG_TRUNCATE
 #    4 - Check for binary log truncation unsafe message in error log.
-#    5 - No rows should be present in 'ti' table. One row should be present in
-#        'tm' table.
+#    5 - No rows should be present in 'ti' table. The 'tm' row may not be present
+#        either (requiring that engine recovery that this test is not after).
 #
 # ==== References ====
 #
@@ -96,10 +96,10 @@ if(!$log_error_)
 
 --echo "Zero rows should be present in 'ti' table."
 SELECT COUNT(*) FROM ti;
---echo "One row must be present in 'tm' table."
+--echo "One or zero row must be present in 'tm' table."
 --replace_regex /Table '.*tm/Table 'tm/
 --disable_warnings
-SELECT COUNT(*) FROM tm;
+SELECT COUNT(*) <= 1 FROM tm;
 --enable_warnings
 SELECT @@GLOBAL.gtid_current_pos;
 

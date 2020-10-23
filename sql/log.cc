@@ -9587,8 +9587,7 @@ int TC_LOG::using_heuristic_recover(const char* opt_name)
                       "the index file. Error: %d; consider recovering "
                       "the index file and retry", error);
     else if ((error= heuristic_binlog_rollback(&xids)))
-      sql_print_error("Heuristic BINLOG_TRUNCATE crash recovery failed. "
-                      "Error: %d", error);
+      sql_print_error("Heuristic BINLOG_TRUNCATE crash recovery failed.");
     if (error > 0)
       rc= 2;
   }
@@ -9932,14 +9931,6 @@ int TC_LOG_BINLOG::heuristic_binlog_rollback(HASH *xids)
     goto end;
   }
 
-
-  error= read_state_from_file();
-  if (error && error != 2)
-  {
-    sql_print_error("tc-heuristic-recover: Failed to load global gtid binlog "
-                    "state from file");
-    goto end;
-  }
   if (!fdle.is_valid())
   {
     error= 1;
@@ -10025,6 +10016,16 @@ int TC_LOG_BINLOG::heuristic_binlog_rollback(HASH *xids)
         {
           if (binlog_truncate_pos > 0)
             is_safe= false;
+        }
+      }
+      break;
+      case START_ENCRYPTION_EVENT:
+      {
+        if ((error= ptr_fdle->start_decryption((Start_encryption_log_event*) ev)))
+        {
+          sql_print_error("tc-heuristic-recover: Format description event "
+                          "decryption failed to start");
+          goto end;
         }
       }
       break;

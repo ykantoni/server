@@ -53,6 +53,7 @@
 #include "rpl_constants.h"
 #include "sql_digest.h"
 #include "zlib.h"
+#include <algorithm>
 
 #define my_b_write_string(A, B) my_b_write((A), (uchar*)(B), (uint) (sizeof(B) - 1))
 
@@ -7561,9 +7562,8 @@ Gtid_log_event::Gtid_log_event(const char *buf, uint event_len,
       DBUG_ASSERT(extra_engines > 0);
     }
   }
-  /* the '<' part of the assert corresponds to zero-padded trailing bytes */
+  /* the '<' part of the assert corresponds to extra trailing bytes */
   DBUG_ASSERT(buf - buf_0 <= event_len);
-  DBUG_ASSERT(buf - buf_0 == event_len || buf_0[event_len - 1] == 0);
 }
 
 

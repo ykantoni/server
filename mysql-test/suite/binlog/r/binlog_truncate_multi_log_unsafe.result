@@ -10,19 +10,25 @@ call mtr.add_suppression("Aborting");
 RESET MASTER;
 CREATE TABLE ti (a INT PRIMARY KEY, b MEDIUMTEXT) ENGINE=Innodb;
 CREATE TABLE tm (f INT) ENGINE=MYISAM;
+connect master1,localhost,root,,;
+connect master2,localhost,root,,;
+connection master1;
 SET DEBUG_SYNC= "commit_before_get_LOCK_commit_ordered SIGNAL con1_ready WAIT_FOR con1_go";
 INSERT INTO ti VALUES (2, REPEAT("x", 4100));
+connection master2;
 SET DEBUG_SYNC= "now WAIT_FOR con1_ready";
 INSERT INTO tm VALUES (30);;
+connection default;
 # Kill the server
-FOUND /tc-heuristic-recover cannot trim the binary log/ in mysqld.1.err
+connection default;
+FOUND 1 /tc-heuristic-recover cannot trim the binary log/ in mysqld.1.err
 "Zero rows should be present in 'ti' table."
 SELECT COUNT(*) FROM ti;
 COUNT(*)
 0
-"One row must be present in 'tm' table."
-SELECT COUNT(*) FROM tm;
-COUNT(*)
+"One or zero row must be present in 'tm' table."
+SELECT COUNT(*) <= 1 FROM tm;
+COUNT(*) <= 1
 1
 SELECT @@GLOBAL.gtid_current_pos;
 @@GLOBAL.gtid_current_pos

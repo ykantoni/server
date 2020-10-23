@@ -54,7 +54,6 @@ EOF
 
 --source include/kill_mysqld.inc
 --source include/wait_until_disconnected.inc
-
 #
 # Server restart
 # The purpose of debug_dbug's "d,skip_new_binlog_create" is to avoid binlog
