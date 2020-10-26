@@ -9786,7 +9786,9 @@ end:
   @retval 1                error
 
 */
-int TC_LOG_BINLOG::get_binlog_checkpoint_file(char* checkpoint_file)
+int TC_LOG_BINLOG::get_binlog_checkpoint_file(char* checkpoint_file,
+                                              Format_description_log_event**
+                                              out_fdle)
 {
   Log_event *ev= NULL;
   bool binlog_checkpoint_found= false;
@@ -9794,7 +9796,7 @@ int TC_LOG_BINLOG::get_binlog_checkpoint_file(char* checkpoint_file)
   const char *errmsg;
   IO_CACHE    log;
   File        file;
-  Format_description_log_event fdle(BINLOG_VERSION);
+  Format_description_log_event fdle(BINLOG_VERSION), *ptr_fdle= &fdle;
   char        log_name[FN_REFLEN];
   int error=1;
 
@@ -9829,10 +9831,20 @@ int TC_LOG_BINLOG::get_binlog_checkpoint_file(char* checkpoint_file)
   }
   while (!binlog_checkpoint_found &&
          (ev=
-          Log_event::read_log_event(&log, 0, &fdle, opt_master_verify_checksum))
+          Log_event::read_log_event(&log, 0, ptr_fdle, opt_master_verify_checksum))
          && ev->is_valid())
   {
     enum Log_event_type typ= ev->get_type_code();
+
+    if (typ == FORMAT_DESCRIPTION_EVENT)
+    {
+      if (ptr_fdle != &fdle)
+        delete ptr_fdle;
+      ptr_fdle= (Format_description_log_event *)ev;
+      if (!(*out_fdle))
+        *out_fdle= (Format_description_log_event *)ev;
+    }
+
     if (typ == BINLOG_CHECKPOINT_EVENT)
     {
       size_t dir_len;
@@ -9855,7 +9867,8 @@ int TC_LOG_BINLOG::get_binlog_checkpoint_file(char* checkpoint_file)
         binlog_checkpoint_found= true;
       }
     }
-    delete ev;
+    if (ev != ptr_fdle)
+      delete ev;
     ev= NULL;
   } // End of while
   end_io_cache(&log);
@@ -9898,7 +9911,7 @@ int TC_LOG_BINLOG::heuristic_binlog_rollback(HASH *xids)
   const char *errmsg;
   IO_CACHE    log;
   File        file=-1;
-  Format_description_log_event fdle(BINLOG_VERSION);
+  Format_description_log_event *ptr_fdle= NULL;
   bool is_safe= true;
   my_off_t tmp_truncate_pos= 0, tmp_pos= 0;
   rpl_gtid last_gtid;
@@ -9906,12 +9919,19 @@ int TC_LOG_BINLOG::heuristic_binlog_rollback(HASH *xids)
   bool last_gtid_valid= false;
   uint last_gtid_engines= 0;
 
-  if ((error= get_binlog_checkpoint_file(checkpoint_file)))
+  if ((error= get_binlog_checkpoint_file(checkpoint_file, &ptr_fdle)))
   {
-      sql_print_error("tc-heuristic-recover: Failed to read latest checkpoint "
-                      "binary log name.");
-      goto end;
-    }
+    sql_print_error("tc-heuristic-recover: Failed to read latest checkpoint "
+                    "binary log name.");
+    goto end;
+  }
+  else if (!(ptr_fdle->flags & LOG_EVENT_BINLOG_IN_USE_F))
+
+  {
+    sql_print_warning("tc-heuristic-recover: the last binlog file "
+                      "was gracefully closed in previous server session so "
+                      "must not have any transaction to recover");
+  }
   sql_print_information("tc-heuristic-recover: Initialising heuristic "
                         "rollback of binary log using last checkpoint "
                         "file:%s.", checkpoint_file);
@@ -9931,22 +9951,21 @@ int TC_LOG_BINLOG::heuristic_binlog_rollback(HASH *xids)
     goto end;
   }
 
-  if (!fdle.is_valid())
-  {
-    error= 1;
-    sql_print_error("tc-heuristic-recover: Failed due to invalid format "
-                    "description log event.");
-    goto end;
-  }
-
   for(;;)
   {
+    enum Log_event_type typ;
+
     while (is_safe &&
-           (ev= Log_event::read_log_event(&log, 0, &fdle,
-            opt_master_verify_checksum)) && ev->is_valid())
+           (ev= Log_event::read_log_event(&log, 0, ptr_fdle,
+                                          opt_master_verify_checksum)) &&
+           ev->is_valid())
     {
-      enum Log_event_type typ= ev->get_type_code();
+      typ= ev->get_type_code();
       switch (typ) {
+      case FORMAT_DESCRIPTION_EVENT:
+        delete ptr_fdle;
+        ptr_fdle= (Format_description_log_event*) ev;
+        break;
       case XID_EVENT:
       {
         xid_recovery_member *member;
@@ -10053,7 +10072,8 @@ int TC_LOG_BINLOG::heuristic_binlog_rollback(HASH *xids)
       }
       // Used to identify the last group specific end position.
       tmp_pos= ev->log_pos;
-      delete ev;
+      if (typ != FORMAT_DESCRIPTION_EVENT)
+        delete ev;
       ev= NULL;
     } // End While
     if (file >= 0)
@@ -10135,6 +10155,7 @@ end:
     end_io_cache(&log);
     mysql_file_close(file, MYF(MY_WME));
   }
+  delete ptr_fdle;
 #endif
 
   return error;

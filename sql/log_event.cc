@@ -7548,7 +7548,7 @@ Gtid_log_event::Gtid_log_event(const char *buf, uint event_len,
     commit_id= uint8korr(buf);
     buf+= 8;
   }
-  // the extra flags check and actions
+  /* the extra flags check and actions */
   if (buf - buf_0 < event_len)
   {
     flags_extra= *buf;
@@ -7562,8 +7562,10 @@ Gtid_log_event::Gtid_log_event(const char *buf, uint event_len,
       DBUG_ASSERT(extra_engines > 0);
     }
   }
-  /* the '<' part of the assert corresponds to extra trailing bytes */
+  /* '<' part of the assert corresponds to extra zero-padded trailing bytes, */
   DBUG_ASSERT(buf - buf_0 <= event_len);
+  /* and the last of them is tested. */
+  DBUG_ASSERT(buf - buf_0 == event_len || buf_0[event_len - 1] == 0);
 }
 
 
